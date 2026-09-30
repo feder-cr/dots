@@ -326,7 +326,12 @@ SNAPSHOT_JS = """() => {
         const r = el.getBoundingClientRect();
         const isSel = el.tagName === 'SELECT';
         const isBox = el.type === 'checkbox' || el.type === 'radio';
-        const text = (isSel ? chosen(el) : (el.innerText || el.value || '')).trim().replace(/\\s+/g, ' ').slice(0, 60);
+        // A password box reports THAT it is filled, never what with: the
+        // snapshot is returned to the model, so its value would be printed
+        // into the conversation the moment anything typed a password.
+        const secret = el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password';
+        const value = secret ? (el.value ? """ + json.dumps(clean.MASKED_PASSWORD) + """ : '') : el.value;
+        const text = (isSel ? chosen(el) : (el.innerText || value || '')).trim().replace(/\\s+/g, ' ').slice(0, 60);
         const href = el.tagName === 'A' ? useful(el.getAttribute('href')) : undefined;
 
         const e = { tag: el.tagName.toLowerCase() };

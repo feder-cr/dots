@@ -152,6 +152,10 @@ SNAPSHOT_CSS = ",".join(
     + ["[onclick]", "[tabindex]:not([tabindex='-1'])", "[contenteditable='true']"]
 )
 
+#: What a filled password box shows instead of its value, here and in the
+#: snapshot (actions.SNAPSHOT_JS), so the two read the same.
+MASKED_PASSWORD = "\u2022" * 8
+
 # Attributes worth their bytes. Everything else goes: `class` alone routinely
 # runs to a few hundred characters of framework utilities per element.
 KEEP_ATTRS = frozenset({
@@ -357,6 +361,14 @@ def _slim_attributes(tree: LexborHTMLParser) -> None:
         if cls:
             hits = [t for t in cls.split() if STATE_CLASS.search(t)]
             state = " ".join(hits[:3])
+        # A password box keeps its `value` attribute only as a sign that it
+        # is filled: the markup goes back to the model, and a page that ships
+        # a prefilled password, or mirrors a typed one into the attribute,
+        # would otherwise put the password in the conversation.
+        if (node.tag == "input" and (attrs.get("type") or "").lower() == "password"
+                and attrs.get("value")):
+            node.attrs["value"] = MASKED_PASSWORD
+            attrs = _attrs(node)
         for name, value in list(attrs.items()):
             if name not in KEEP_ATTRS:
                 del node.attrs[name]
