@@ -667,6 +667,10 @@ async def _type_and_keep(session, selector: str, text: str) -> str:
     """
     page = session.page()
     began = time.monotonic()
+    # Asked before typing as well as after: a page can turn a password box
+    # into a text box once it holds a value (a "show password" toggle), and
+    # the reply must not then print what was typed into it.
+    secret = await _is_password(page, selector)
     value, before, tries = None, None, 0
     for tries in range(1, TYPE_ATTEMPTS + 1):
         await _put(page, selector, text)
@@ -694,7 +698,7 @@ async def _type_and_keep(session, selector: str, text: str) -> str:
             f"{selector} kept the first {len(value)} of {len(text)} characters "
             "and took no more, which is what a maxlength does. Shorten the text "
             "and type it again.")
-    if await _is_password(page, selector):
+    if secret or await _is_password(page, selector):
         return f"typed into {selector}; the page changed it to {len(value)} characters"
     shown = value if len(value) <= 120 else value[:117] + "..."
     return f"typed into {selector}; the page shows it as {shown!r}"
