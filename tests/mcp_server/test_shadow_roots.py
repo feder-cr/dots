@@ -1,0 +1,197 @@
+"""Controls inside open shadow roots are reported and reachable.
+
+Measured on 2026-09-30 against a real contact form built from custom
+elements: `<x-textfield id="firstName">` renders its `<input>` inside an open
+shadow root, and so do its `<x-select>` and its option tiles.
+`browser_snapshot` walked `document.querySelectorAll`, which stops at every
+shadow boundary, so it listed two radios and a privacy link and none of the
+fields. The caller wrote `#firstName input` - which Playwright's CSS engine
+does pierce - and `browser_type` then waited thirty seconds and reported
+`{"matches": 0}`, because the diagnosis also searched with
+`document.querySelectorAll` and so contradicted the engine it was explaining.
+
+These run the real functions in a real engine against a page whose only
+controls live in shadow roots, nested and not, and one in a CLOSED root, which
+a page script cannot reach either and must not be claimed.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+
+import pytest
+
+from invisible_playwright_mcp.mcp import actions
+
+PAGE = b"""<!doctype html>
+<html><head><title>shadow form</title></head><body>
+<script>
+  class Field extends HTMLElement {
+    constructor() {
+      super();
+      const root = this.attachShadow({mode: 'open'});
+      root.innerHTML = '<label for="input">' + this.getAttribute('label') +
+        '</label><input id="input" type="text">';
+    }
+  }
+  customElements.define('x-field', Field);
+  class Pick extends HTMLElement {
+    constructor() {
+      super();
+      const root = this.attachShadow({mode: 'open'});
+      root.innerHTML = '<select id="select"><option value="">-</option>' +
+        '<option value="TX">Texas</option><option value="WA">Washington</option></select>';
+    }
+  }
+  customElements.define('x-pick', Pick);
+  // A field inside a component inside a component: two boundaries.
+  class Card extends HTMLElement {
+    constructor() {
+      super();
+      const root = this.attachShadow({mode: 'open'});
+      root.innerHTML = '<x-field id="inner" label="Nested"></x-field>' +
+        '<button id="go" type="button">Card button</button>';
+    }
+  }
+  customElements.define('x-card', Card);
+  class Sealed extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({mode: 'closed'}).innerHTML = '<input id="sealed-input">';
+    }
+  }
+  customElements.define('x-sealed', Sealed);
+</script>
+<x-field id="firstName" label="First Name"></x-field>
+<x-field id="lastName" label="Last Name"></x-field>
+<x-pick id="state"></x-pick>
+<x-card id="card"></x-card>
+<x-sealed id="sealed"></x-sealed>
+<input id="plain" name="plain" type="text">
+</body></html>"""
+
+
+def _serve():
+    import http.server
+    import socket
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(PAGE)))
+            self.end_headers()
+            self.wfile.write(PAGE)
+
+        def log_message(self, *a):
+            pass
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/" % port
+
+
+@pytest.fixture(scope="module")
+def run():
+    """One browser for the file; each test hands in a coroutine to run on it."""
+    from invisible_playwright_mcp.mcp.plan import plan_session
+    from invisible_playwright_mcp.mcp.session import StealthSession
+
+    srv, url = _serve()
+    loop = asyncio.new_event_loop()
+    session = StealthSession(**plan_session().kwargs)
+    loop.run_until_complete(session.start())
+
+    def go(fn):
+        async def body():
+            await actions.navigate(session, url)
+            return await fn(session)
+        return loop.run_until_complete(body())
+
+    try:
+        yield go
+    finally:
+        loop.run_until_complete(session.close())
+        loop.close()
+        srv.shutdown()
+
+
+def _elements(run):
+    async def snap(s):
+        return json.loads(await actions.snapshot(s))["interactive_elements"]
+    return run(snap)
+
+
+def _by_selector(elements):
+    return {e.get("selector"): e for e in elements}
+
+
+@pytest.mark.e2e
+def test_the_snapshot_lists_controls_inside_open_shadow_roots(run):
+    sels = _by_selector(_elements(run))
+    for wanted in ("#firstName >> #input", "#lastName >> #input",
+                   "#state >> #select", "#card >> #inner >> #input",
+                   "#card >> #go", "#plain"):
+        assert wanted in sels, "missing %s; got %s" % (wanted, sorted(map(str, sels)))
+    assert sels["#state >> #select"]["tag"] == "select"
+
+
+@pytest.mark.e2e
+def test_a_closed_root_is_not_claimed(run):
+    """A closed root is closed to the page's own scripts too; reporting a
+    selector into it would be reporting one the engine cannot use."""
+    assert not any("sealed" in str(e.get("selector")) for e in _elements(run))
+
+
+@pytest.mark.e2e
+def test_every_shadow_selector_the_snapshot_gives_can_be_used(run):
+    async def body(s):
+        out = {}
+        for sel in ("#firstName >> #input", "#card >> #inner >> #input"):
+            await actions.type_text(s, sel, "Plain")
+            out[sel] = await s.page().locator(sel).input_value()
+        await actions.click(s, "#card >> #go")
+        return out
+    assert run(body) == {"#firstName >> #input": "Plain",
+                         "#card >> #inner >> #input": "Plain"}
+
+
+@pytest.mark.e2e
+@pytest.mark.xfail(strict=True, reason=(
+    "engine: Page.dispatchTrustedInputEvents answers NS_ERROR_UNEXPECTED for a "
+    "node inside a shadow tree (dispatchDOMEventViaPresShellForTesting needs an "
+    "uncomposed document). Fixed in invisible_playwright, not here; strict, so "
+    "this turns red the day the pinned engine is fixed and the mark must go."))
+def test_a_select_inside_a_shadow_root_can_be_set(run):
+    async def body(s):
+        await actions.select_option(s, "#state >> #select", "Texas")
+        return await s.page().locator("#state >> #select").input_value()
+    assert run(body) == "TX"
+
+
+@pytest.mark.e2e
+def test_a_descendant_selector_across_the_boundary_works_too(run):
+    """What the caller wrote on the real page. Playwright's CSS pierces open
+    roots, so this is reachable and must not be refused."""
+    async def body(s):
+        await actions.type_text(s, "#firstName input", "Words")
+        return await s.page().locator("#firstName >> #input").input_value()
+    assert run(body) == "Words"
+
+
+@pytest.mark.e2e
+def test_nothing_matching_fails_fast_and_says_so(run):
+    async def body(s):
+        t = time.monotonic()
+        with pytest.raises(RuntimeError) as err:
+            await actions.type_text(s, "#nowhere input", "x")
+        return time.monotonic() - t, str(err.value)
+    took, message = run(body)
+    assert '"matches": 0' in message
+    assert took < 8, "a selector matching nothing took %.1fs to fail" % took

@@ -267,6 +267,22 @@ SNAPSHOT_JS = """() => {
         }
         return matches.get(sel);
     }
+    // What Playwright's CSS engine finds for `sel` searched from `host`, in the
+    // order it finds it: the host's light descendants, then its shadow root,
+    // then every open shadow root below either. That is `_queryCSS` with
+    // pierceShadow, transcribed, because the index into this list is what
+    // `>> nth=` counts against, and a different order would aim it at a
+    // different element without failing.
+    function piercedFrom(host, sel) {
+        let out = [];
+        function query(root) {
+            out = out.concat(Array.from(root.querySelectorAll(sel)));
+            if (root.shadowRoot) query(root.shadowRoot);
+            for (const e of root.querySelectorAll('*')) if (e.shadowRoot) query(e.shadowRoot);
+        }
+        try { query(host); } catch (err) { out = []; }
+        return out;
+    }
     function cssq(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^\\w-]/g, '\\\\$&'); }
     // Single quotes inside the selector, because this string is about to be
     // serialized as JSON and every double quote in it would come back as two
@@ -298,6 +314,26 @@ SNAPSHOT_JS = """() => {
             }
         }
         if (!base) return null;
+        // ⛔ INSIDE A SHADOW ROOT the document cannot see the element, so a
+        // selector searched from the document by querySelectorAll cannot be
+        // checked for uniqueness there, and the page's own tools would say it
+        // matches nothing. Measured 2026-09-30 on a real form whose
+        // every field is an <input> inside an open shadow root of a custom
+        // element (<x-textfield id="firstName">): the snapshot listed none of
+        // them. The handle is the HOST's handle, then `>>`, then this
+        // element's handle searched from the host - Playwright's own chaining,
+        // which pierces open roots - so `#firstName >> #input`.
+        const root = el.getRootNode ? el.getRootNode() : document;
+        if (root && root !== document && root.host) {
+            const outer = handle(root.host, undefined);
+            if (!outer) return null;
+            const inner = piercedFrom(root.host, base);
+            const k = inner.indexOf(el);
+            if (k < 0) return null;
+            const chained = outer.sel + ' >> ' + base;
+            return {sel: inner.length === 1 ? chained : chained + ' >> nth=' + k,
+                    fromHref: fromHref};
+        }
         const n = nodesFor(base);
         if (n.length === 1) return {sel: base, fromHref: fromHref};
         const i = n.indexOf(el);
@@ -318,7 +354,21 @@ SNAPSHOT_JS = """() => {
     // page killed the whole snapshot from inside getBoundingClientRect, and the
     // caller received nothing at all - which is worse than any partial answer,
     // and indistinguishable from a page with no controls on it.
-    for (const el of document.querySelectorAll(SEL)) {
+    // Every control in the document AND in every open shadow root under it.
+    // `document.querySelectorAll` stops at each shadow boundary, so a page
+    // built from web components - the form above - reported two
+    // radios and a link and none of its fields. A closed root is left alone:
+    // `shadowRoot` is null for it here, as it is for the page's own scripts.
+    function everyControl() {
+        const found = [];
+        function visit(root) {
+            for (const e of root.querySelectorAll(SEL)) found.push(e);
+            for (const e of root.querySelectorAll('*')) if (e.shadowRoot) visit(e.shadowRoot);
+        }
+        visit(document);
+        return found;
+    }
+    for (const el of everyControl()) {
       try {
         if (seen.has(el)) continue;
         seen.add(el);
@@ -434,15 +484,20 @@ async def screenshot_png(session) -> bytes:
 
 # --- acting ----------------------------------------------------------------
 
-DIAGNOSE_JS = """(sel) => {
-    // Why a click could not land. Runs only after one has failed, so it can
+DIAGNOSE_JS = """(el) => {
+    // Why an action could not land on `el`, the first element the ENGINE
+    // resolved the selector to. Runs only after one has failed, so it can
     // afford to look properly.
-    let n = [];
-    try { n = document.querySelectorAll(sel); } catch (err) { return {bad_selector: true}; }
-    if (!n.length) return {matches: 0};
-    const el = n[0];
+    //
+    // ⛔ IT IS HANDED THE ELEMENT, NOT THE SELECTOR. It used to search for the
+    // selector itself with document.querySelectorAll, which knows neither a
+    // shadow root nor Playwright's own syntax (`>>`, `:nth-match`, `nth=`) -
+    // so on 2026-09-30 it answered `{"matches": 0}` for `#firstName input`,
+    // a field the engine could reach, and called the snapshot's own
+    // `:nth-match` handles "not valid CSS". An explanation that contradicts
+    // the engine it explains sends the caller the wrong way.
     const r = el.getBoundingClientRect();
-    const out = {matches: n.length, width: Math.round(r.width), height: Math.round(r.height)};
+    const out = {width: Math.round(r.width), height: Math.round(r.height)};
     const s = getComputedStyle(el);
     if (s.display === 'none') out.display_none = true;
     if (s.visibility === 'hidden') out.visibility_hidden = true;
@@ -452,9 +507,17 @@ DIAGNOSE_JS = """(sel) => {
     // The one that matters most: something else is on top. Report WHAT, because
     // the caller's next move is to deal with that thing.
     const cx = Math.round(r.left + r.width / 2), cy = Math.round(r.top + r.height / 2);
+    // Asked of the element's own root: the document answers with the shadow
+    // HOST for anything inside a shadow root, and the host does not
+    // `contains()` its shadow content, so every such field read as covered.
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const within = (a, b) => {
+        for (let n = a; n; n = n.parentNode || n.host) if (n === b) return true;
+        return false;
+    };
     if (cx >= 0 && cy >= 0 && cx < innerWidth && cy < innerHeight) {
-        const hit = document.elementFromPoint(cx, cy);
-        if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) {
+        const hit = (root.elementFromPoint ? root : document).elementFromPoint(cx, cy);
+        if (hit && !within(hit, el) && !within(el, hit)) {
             out.covered_by = {
                 tag: hit.tagName.toLowerCase(),
                 id: hit.id || undefined,
@@ -527,6 +590,75 @@ def next_move(why: dict) -> str:
             "action was momentary. Look at the page before trying again.")
 
 
+#: How long a selector may match nothing before an action gives up on it.
+#: Long enough for an element a click has just asked for to arrive; short
+#: enough that a selector the page will never match costs seconds rather than
+#: the whole action timeout. It was the whole timeout - fifteen seconds, and on
+#: 2026-09-30 thirty - for an answer the page could give at once.
+PRESENCE_MS = 3_000
+
+#: What the engine says when a selector cannot be parsed, as opposed to when the
+#: page could not be asked. Only these become `bad_selector`: anything else -
+#: a navigation, a closed page - is not the caller's selector's fault.
+_UNPARSABLE = re.compile(
+    r"not a valid selector|unexpected token|unknown engine|selector.*(?:parse|syntax)"
+    r"|syntaxerror|malformed|invalid selector", re.I)
+
+
+async def _diagnose(page, selector: str):
+    """What the page says about `selector`, resolved by the ENGINE.
+
+    The engine is what the action used, so it is what the explanation asks:
+    shadow roots, `>>` chains and `:nth-match` mean the same thing to both.
+    None when the page could not be asked at all.
+    """
+    try:
+        found = await page.query_selector_all(selector)
+    except Exception as exc:
+        if _UNPARSABLE.search(str(exc)):
+            return {"bad_selector": True}
+        return None
+    try:
+        if not found:
+            return {"matches": 0}
+        why = {"matches": len(found)}
+        with swallow("the element can go between being found and being read"):
+            why.update(await found[0].evaluate(DIAGNOSE_JS) or {})
+        return why
+    finally:
+        for element in found or ():
+            with swallow("a handle the page already dropped needs no release"):
+                await element.dispose()
+
+
+def _explain(exc, what: str, why: dict) -> RuntimeError:
+    return RuntimeError(
+        "%s\n\nwhy the %s did not land: %s\nwhat to do: %s"
+        % (exc, what, json.dumps(why), next_move(why)))
+
+
+async def _require_present(session, selector: str, what: str) -> None:
+    """Fail in seconds, with the reason, when nothing matches `selector`.
+
+    ⛔ A SELECTOR THAT MATCHES NOTHING USED TO COST THE WHOLE ACTION TIMEOUT.
+    The action retries until its deadline because the element might still
+    appear, which is right for an element that is coming and pure waste for
+    one that is not - and the caller cannot tell which it was until the end.
+    Measured 2026-09-30: `#firstName input` on such a form waited thirty
+    seconds and then reported `{"matches": 0}`.
+    """
+    page = session.page()
+    try:
+        await page.wait_for_selector(selector, state="attached", timeout=PRESENCE_MS)
+    except Exception as exc:
+        why = await _diagnose(page, selector)
+        if why is None:
+            raise
+        if why.get("matches") and not why.get("bad_selector"):
+            return  # it arrived just as the wait gave up
+        raise _explain(exc, what, why) from exc
+
+
 async def _on_selector(session, selector: str, what: str, act):
     """Run an action aimed at a selector, and when it fails say why and what
     follows from it.
@@ -537,18 +669,17 @@ async def _on_selector(session, selector: str, what: str, act):
     them failed that way: a logo, a footer link, a shipping button. Fifteen
     seconds spent to learn nothing.
     """
+    await _require_present(session, selector, what)
     try:
         return await act()
     except Exception as exc:
         try:
-            why = await session.page().evaluate(DIAGNOSE_JS, selector)
+            why = await _diagnose(session.page(), selector)
         except Exception:
             why = None
         if not why:
             raise
-        raise RuntimeError(
-            "%s\n\nwhy the %s did not land: %s\nwhat to do: %s"
-            % (exc, what, json.dumps(why), next_move(why))) from exc
+        raise _explain(exc, what, why) from exc
 
 
 async def click(session, selector: str) -> str:
@@ -604,6 +735,9 @@ async def select_option(session, selector: str, value: str) -> str:
     caller to know a hidden attribute is a tool that gets used wrong.
     """
     page = session.page()
+    # Before the first attempt too: it is not explained, and it would otherwise
+    # spend its whole timeout on a selector that matches nothing.
+    await _require_present(session, selector, "select")
     # Not an error yet: `value` may well have been a label. The second attempt
     # is what decides, and its failure is the one worth reporting.
     with swallow("the value may have been a label; the second attempt decides"):

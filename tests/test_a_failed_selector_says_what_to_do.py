@@ -29,16 +29,40 @@ import pytest
 from invisible_playwright_mcp.mcp import actions
 
 
+class _Element:
+    """The first element the engine resolved; it reports the rest of `why`."""
+
+    def __init__(self, why):
+        self.why = why
+
+    async def evaluate(self, expression, *args):
+        return {k: v for k, v in self.why.items() if k != "matches"}
+
+    async def dispose(self):
+        pass
+
+
 class _Page:
-    """A page where the action fails and the diagnosis answers `why`."""
+    """A page where the action fails and the diagnosis answers `why`.
+
+    The diagnosis asks the ENGINE (query_selector_all), as the action does, and
+    a selector the engine matches nothing for fails the presence check before
+    any action is attempted.
+    """
 
     def __init__(self, why):
         self.why = why
         self.asked = []
 
-    async def evaluate(self, expression, *args):
-        self.asked.append(args[0] if args else None)
-        return self.why
+    async def wait_for_selector(self, selector, **kw):
+        if self.why is not None and not self.why.get("matches"):
+            raise TimeoutError("Page.waitForSelector: %r did not become attached in 3s" % selector)
+
+    async def query_selector_all(self, selector):
+        self.asked.append(selector)
+        if self.why.get("bad_selector"):
+            raise ValueError("%r is not a valid selector" % selector)
+        return [_Element(self.why)] * int(self.why.get("matches") or 0)
 
     async def click(self, selector, **kw):
         raise TimeoutError("Page.click: %r not actionable in 15s" % selector)
@@ -138,7 +162,7 @@ async def test_a_page_that_cannot_be_asked_does_not_swallow_the_real_failure():
     answer - it navigated, it died - the original failure must still reach the
     caller rather than being replaced by a failure to explain it."""
     class _Mute(_Page):
-        async def evaluate(self, expression, *args):
+        async def query_selector_all(self, selector):
             raise RuntimeError("execution context was destroyed")
 
     session = _Session(None)

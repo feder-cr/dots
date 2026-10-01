@@ -36,6 +36,33 @@ def page():
         ctx.close()
 
 
+class _Async:
+    """The sync page, awaitable, so the REAL `actions._diagnose` runs on it
+    rather than a copy of it written into this file."""
+
+    def __init__(self, target):
+        self._target = target
+
+    def __getattr__(self, name):
+        attr = getattr(self._target, name)
+
+        async def call(*a, **k):
+            out = attr(*a, **k)
+            return [_Async(e) for e in out] if isinstance(out, list) else out
+        return call
+
+
+def _complete(coro):
+    """Run a coroutine that never suspends. The sync page already owns this
+    thread's event loop, so asyncio.run() is refused here, and `_Async` awaits
+    nothing that waits."""
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    raise AssertionError("the diagnosis suspended on a page that cannot")
+
+
 def _why(page, body, selector="#b"):
     """Click and return the diagnosis, or None if the click worked."""
     from urllib.parse import quote
@@ -48,7 +75,7 @@ def _why(page, body, selector="#b"):
         page.click(selector, timeout=2000)
         return None
     except Exception:
-        return page.evaluate(actions.DIAGNOSE_JS, selector)
+        return _complete(actions._diagnose(_Async(page), selector))
 
 
 @pytest.mark.e2e
@@ -86,9 +113,31 @@ def test_a_click_that_works_is_not_diagnosed(page):
     assert _why(page, "<button id='b'>Send</button>") is None
 
 
-def test_the_diagnosis_never_throws_on_a_bad_selector():
+@pytest.mark.e2e
+def test_the_engine_s_own_refusal_of_a_bad_selector_is_recognised(page):
+    """`bad_selector` is read off the engine's message, so the message has to be
+    one `_UNPARSABLE` knows; otherwise a typo reads as a page that cannot be
+    asked, and the caller is told nothing."""
+    why = _why(page, "<button id='b'>Send</button>", selector="#b[")
+    assert why == {"bad_selector": True}, why
+
+
+class _Refusing:
+    def __init__(self, message):
+        self.message = message
+
+    async def query_selector_all(self, selector):
+        raise RuntimeError(self.message)
+
+
+async def test_the_diagnosis_never_throws_on_a_bad_selector():
     """It runs inside an exception handler. If it raised, it would replace the
     real error with its own, which is worse than saying nothing."""
-    js = actions.DIAGNOSE_JS
-    assert "try {" in js and "bad_selector" in js, (
-        "an invalid selector would make the diagnosis itself throw")
+    why = await actions._diagnose(_Refusing("'#b[' is not a valid selector"), "#b[")
+    assert why == {"bad_selector": True}
+
+
+async def test_a_page_that_cannot_be_asked_is_not_called_a_bad_selector():
+    """A navigation mid-diagnosis is not the caller's typo, and saying it was
+    would send them to rewrite a selector that is fine."""
+    assert await actions._diagnose(_Refusing("execution context was destroyed"), "#b") is None
