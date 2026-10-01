@@ -595,8 +595,10 @@ async def browser_type(selector: str, text: str, browser: Browser = None) -> str
 
     Up to 80 characters are typed key by key at a human pace (about 0.4 s a
     character). Longer text goes in at once, as a paste does: no key events,
-    one trusted input event, and the field's maxlength applies. Calls that act
-    on the same browser run one at a time, in order."""
+    one trusted input event, and the field's maxlength applies. The field is
+    read back once the page has answered; text the page dropped while it
+    arrived is typed again. Calls that act on the same browser run one at a
+    time, in order."""
     return await work.acting(actions.type_text, selector, text, role=browser,
                              exclusive=True)
 
