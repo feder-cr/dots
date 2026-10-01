@@ -129,6 +129,20 @@ def test_a_password_the_page_changed_is_not_echoed(quick):
     assert "Xx" not in out and "Hunter2" not in out
 
 
+class _Unmasking(_Page):
+    """A password box the page turns into a text box once it holds a value."""
+
+    async def fill(self, selector, text, **kw):
+        await super().fill(selector, text, **kw)
+        self.types[selector] = "text"
+
+
+def test_a_password_box_turned_text_is_still_not_echoed(quick):
+    page = _Unmasking(wipes=0, shows="Hunter2x", types={"#p": "password"})
+    out = _type(page, "Hunter2", selector="#p")
+    assert "Hunter" not in out
+
+
 # --- against a real engine -------------------------------------------------
 
 PAGE = b"""<!doctype html><html><body>
