@@ -181,8 +181,10 @@ def _upload(page, paths, selector="#f"):
 
 
 @pytest.fixture
-def env(allowed, monkeypatch):
+def env(allowed, tmp_path, monkeypatch):
     monkeypatch.setenv(actions.UPLOAD_DIRS_ENV, str(allowed))
+    (tmp_path / "snapshots").mkdir()
+    monkeypatch.setattr(actions.tempfile, "tempdir", str(tmp_path / "snapshots"))
     return allowed
 
 
@@ -316,3 +318,68 @@ def test_a_hidden_input_named_directly_gets_the_files(url, env):
     out, seen = asyncio.run(_with_browser(url, body))
     assert "hidden" in out and out.endswith("a.pdf")
     assert '"names":["a.pdf"]' in seen and '"trusted":true' in seen
+
+
+# --- the snapshot: what is uploaded is the file that was checked -------------
+
+@pytest.fixture
+def private_tmp(tmp_path, monkeypatch):
+    base = tmp_path / "tmp"
+    base.mkdir()
+    monkeypatch.setattr(actions.tempfile, "tempdir", str(base))
+    return base
+
+
+def test_the_engine_gets_a_private_copy_of_what_was_checked(allowed, private_tmp):
+    real = actions.uploadable([str(allowed / "a.pdf")], env=_env(allowed))
+    copy, = actions.snapshot_files(real, env=_env(allowed))
+    assert os.path.basename(copy) == "a.pdf"
+    assert copy.startswith(str(private_tmp)) and open(copy, "rb").read() == b"%PDF-1.4 a"
+    assert os.stat(os.path.dirname(os.path.dirname(copy))).st_mode & 0o077 == 0
+    (allowed / "a.pdf").write_bytes(b"changed afterwards")
+    assert open(copy, "rb").read() == b"%PDF-1.4 a", "the copy is not the name"
+
+
+def test_a_name_swapped_for_a_link_after_the_check_is_not_followed(allowed, tmp_path, private_tmp):
+    """The race in a shared staging directory: checked as a file, replaced by
+    a link to something outside before the chooser is answered."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("key")
+    real = actions.uploadable([str(allowed / "a.pdf")], env=_env(allowed))
+    os.remove(allowed / "a.pdf")
+    (allowed / "a.pdf").symlink_to(secret)
+    with pytest.raises(PermissionError, match="not sent"):
+        actions.snapshot_files(real, env=_env(allowed))
+    assert os.listdir(private_tmp) == [], "a refused snapshot leaves nothing behind"
+
+
+def test_a_directory_swapped_out_from_under_the_name_is_caught(allowed, tmp_path, private_tmp):
+    sub = allowed / "sub"
+    sub.mkdir()
+    (sub / "c.pdf").write_bytes(b"ok")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "c.pdf").write_bytes(b"secret")
+    real = actions.uploadable([str(sub / "c.pdf")], env=_env(allowed))
+    os.rename(sub, allowed / "gone")
+    sub.symlink_to(outside)
+    with pytest.raises(PermissionError, match="no longer inside"):
+        actions.snapshot_files(real, env=_env(allowed))
+
+
+def test_a_file_that_grew_past_the_limit_is_not_sent(allowed, private_tmp, monkeypatch):
+    real = actions.uploadable([str(allowed / "a.pdf")], env=_env(allowed))
+    monkeypatch.setattr(actions, "UPLOAD_MAX_BYTES", 4)
+    with pytest.raises(ValueError, match="limit"):
+        actions.snapshot_files(real, env=_env(allowed))
+    assert os.listdir(private_tmp) == []
+
+
+def test_old_snapshots_expire_and_fresh_ones_stay(allowed, private_tmp):
+    real = actions.uploadable([str(allowed / "a.pdf")], env=_env(allowed))
+    old, = actions.snapshot_files(real, env=_env(allowed))
+    old_root = os.path.dirname(os.path.dirname(old))
+    os.utime(old_root, (0, 0))
+    new, = actions.snapshot_files(real, env=_env(allowed))
+    assert not os.path.exists(old_root)
+    assert os.path.exists(new)
