@@ -165,7 +165,8 @@ a browser gets when nobody says anything.
 `browser_open`, `browser_close`, `browser_list`, `browser_status`,
 `browser_navigate`, `browser_read_text`, `browser_snapshot`, `browser_read_html`,
 `browser_take_screenshot`, `browser_watch`, `browser_click`, `browser_click_at`,
-`browser_type`, `browser_select_option`, `browser_press_key`, `browser_evaluate`.
+`browser_type`, `browser_select_option`, `browser_press_key`,
+`browser_upload_files`, `browser_evaluate`.
 
 Tool names mirror the Microsoft Playwright MCP, so prompts written for it work
 here too, with one deliberate departure: **there are no tab tools.** Three
@@ -333,6 +334,7 @@ so.
 | `browser_click_at` | `x`, `y`, `hold_seconds` (default 0) | Clicks a viewport coordinate instead of a selector: moves the pointer there, presses, holds if asked, releases, and returns a screenshot taken right after. For a slider track, a canvas-drawn challenge, a precise point inside a wider element. |
 | `browser_type` | `selector`, `text` | Fills a field, replacing whatever it holds. It sets the value rather than typing key by key, so per-keystroke handlers such as an autocomplete do not fire; for those, click the field and use `browser_press_key`. |
 | `browser_select_option` | `selector`, `value` | Chooses an option in a `<select>`, by its visible label or by its value. |
+| `browser_upload_files` | `selector`, `paths` | Attaches local files to a file input the way a person picks them: the input, or the button or label that opens its chooser, is clicked with the real pointer and the chooser is answered with `paths`. A hidden input is given the files directly, as its chooser would. Off unless `INVISIBLE_MCP_UPLOAD_DIRS` names the directories files may come from (absolute, separated by `:`, `;` on Windows); a path must be a regular file inside one of them, under no hidden directory, at most 50 MB. |
 | `browser_press_key` | `key` | Presses a key on whatever has focus: `Enter`, `Tab`, `Escape`, `ArrowDown`, `Control+a`, or a single character. |
 | `browser_evaluate` | `expression` | Runs JavaScript to **read** from the page and returns the result as JSON: a computed style, a value held in a framework's state, the length of a list. |
 

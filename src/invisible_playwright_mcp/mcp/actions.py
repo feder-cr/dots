@@ -15,7 +15,9 @@ acts on it.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from typing import Any
 
 from . import clean
@@ -615,6 +617,167 @@ async def select_option(session, selector: str, value: str) -> str:
         raise RuntimeError(
             f"no option in {selector} has the value or the label {value!r}")
     return f"selected {selector} by label: {chosen}"
+
+
+# ── files, picked the way a person picks them ──────────────────────────────
+#
+# ⛔ WITHOUT THIS, AN UPLOAD WAS IMPOSSIBLE, AND IMPOSSIBLE IS NOT NEUTRAL. A
+# file input takes nothing from the keyboard and nothing from browser_evaluate,
+# so a credit application's "Supporting Documents" page (measured 2026-10-01)
+# was the end of the road: the model could click "Add Document", watch a chooser
+# open that no tool could answer, and stop. The way past it a model finds next
+# is script - a DataTransfer built in the page and assigned to `input.files`,
+# which is exactly the untrusted change this package exists to avoid.
+#
+# The file chooser is what a person uses, so the chooser is what this answers:
+# the real pointer clicks what opens it and the files go in through the
+# engine's own file-input path, with the input and change events a picked file
+# produces. A hidden input - the usual shape, a styled button in front of an
+# `<input type=file>` nobody can see - is given the files directly, which is
+# what its chooser would have done; there is nothing visible to click on it.
+#
+# ⛔ AND IT READS ONLY FROM DIRECTORIES SOMEBODY NAMED. This hands a local file
+# to a remote page, and the model choosing the path is driven by pages it has
+# read. With no list there are no uploads at all, rather than a default that
+# would have to guess which part of a disk is safe to send away.
+
+#: The directories files may be uploaded from, separated by os.pathsep.
+UPLOAD_DIRS_ENV = "INVISIBLE_MCP_UPLOAD_DIRS"
+#: Per file. A form upload past this is not a document, and a typo naming a
+#: disk image should not take the browser down with it.
+UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+UPLOAD_MAX_FILES = 20
+#: How long the click has to open a chooser before the selector is reported as
+#: not the thing that opens one.
+CHOOSER_MS = 10_000
+
+_FILE_INPUT_JS = """el => ({
+  file: el.tagName === "INPUT" && (el.type || "").toLowerCase() === "file",
+  multiple: !!el.multiple,
+  shown: (() => { const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    return r.width > 1 && r.height > 1 && s.visibility !== "hidden"
+        && s.display !== "none" && +s.opacity > 0.01; })()
+})"""
+_FILE_NAMES_JS = "el => el.files ? Array.from(el.files, f => f.name) : null"
+
+
+def upload_dirs(env=None) -> list[str]:
+    """The directories named in INVISIBLE_MCP_UPLOAD_DIRS, resolved. A relative
+    entry is refused rather than resolved against wherever the server started."""
+    raw = (os.environ if env is None else env).get(UPLOAD_DIRS_ENV, "")
+    dirs = []
+    for entry in (e.strip() for e in raw.split(os.pathsep)):
+        if not entry:
+            continue
+        if not os.path.isabs(entry):
+            raise RuntimeError(
+                f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not an absolute path")
+        dirs.append(os.path.realpath(entry))
+    return dirs
+
+
+def uploadable(paths, env=None) -> list[str]:
+    """The files `paths` names, resolved, or the reason they may not be sent.
+
+    Each must be absolute, a regular file once symlinks are followed, readable,
+    under UPLOAD_MAX_BYTES, inside one of the named directories, and below it
+    through no hidden component (`.ssh`, `.env`, `.git`): those hold keys more
+    often than documents. The resolved path is what is handed on, so a link
+    swapped after this check still cannot point the upload somewhere else.
+    """
+    if isinstance(paths, str) or not isinstance(paths, (list, tuple)) or not paths:
+        raise ValueError("paths is a list of one or more absolute file paths")
+    if len(paths) > UPLOAD_MAX_FILES:
+        raise ValueError(f"at most {UPLOAD_MAX_FILES} files in one upload")
+    dirs = upload_dirs(env)
+    if not dirs:
+        raise RuntimeError(
+            f"uploads are off: {UPLOAD_DIRS_ENV} names no directory files may be "
+            "uploaded from")
+    out = []
+    for path in paths:
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise ValueError(f"{path!r} is not an absolute path")
+        real = os.path.realpath(path)
+        home = next((d for d in dirs if os.path.commonpath([real, d]) == d), None)
+        if home is None:
+            raise PermissionError(
+                f"{path} is not inside a directory uploads may come from "
+                f"({os.pathsep.join(dirs)})")
+        rel = os.path.relpath(real, home)
+        hidden = [c for c in rel.split(os.sep) if c.startswith(".")] if rel != "." else []
+        if hidden:
+            raise PermissionError(f"{path} lies under a hidden name ({hidden[0]}); not sent")
+        try:
+            st = os.stat(real)
+        except OSError as exc:
+            raise FileNotFoundError(f"{path}: {exc.strerror or exc}") from None
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        if st.st_size > UPLOAD_MAX_BYTES:
+            raise ValueError(f"{path} is {st.st_size} bytes, over the "
+                             f"{UPLOAD_MAX_BYTES}-byte limit for one file")
+        if not os.access(real, os.R_OK):
+            raise PermissionError(f"{path} is not readable")
+        if real in out:
+            raise ValueError(f"{path} is named twice")
+        out.append(real)
+    return out
+
+
+async def upload_files(session, selector: str, paths) -> str:
+    """Attach local files to a file input, through its file chooser."""
+    files = uploadable(paths)
+    page = session.page()
+    target = await _on_selector(session, selector, "upload",
+                                lambda: page.eval_on_selector(selector, _FILE_INPUT_JS))
+    names = ", ".join(os.path.basename(f) for f in files)
+
+    if target["file"] and not target["shown"]:
+        if len(files) > 1 and not target["multiple"]:
+            raise RuntimeError(f"{selector} takes one file; upload them one at a time")
+        await _on_selector(session, selector, "upload",
+                           lambda: page.set_input_files(selector, files, timeout=15_000))
+        how = "the input is hidden, so given them directly, as its chooser does"
+        held = await _held(page.eval_on_selector(selector, _FILE_NAMES_JS))
+    else:
+        try:
+            async with page.expect_file_chooser(timeout=CHOOSER_MS) as chosen:
+                await _on_selector(session, selector, "click",
+                                   lambda: page.click(selector, timeout=15_000))
+            chooser = await chosen.value
+        except Exception as exc:
+            if "Timeout" not in type(exc).__name__ and "imeout" not in str(exc):
+                raise
+            raise RuntimeError(
+                f"clicking {selector} opened no file chooser. Give the selector of "
+                "the <input type=file>, or of the button or label that opens it "
+                "(browser_snapshot lists both).") from None
+        if len(files) > 1 and not chooser.is_multiple():
+            raise RuntimeError(
+                f"the chooser {selector} opened takes one file; nothing was "
+                "attached. Upload them one at a time")
+        await chooser.set_files(files, timeout=15_000)
+        how = "picked in the file chooser"
+        held = await _held(chooser.element.evaluate(_FILE_NAMES_JS))
+
+    said = f"attached {len(files)} file{'s' if len(files) != 1 else ''} to {selector} ({how}): {names}"
+    want = [os.path.basename(f) for f in files]
+    if held is None or held == want:
+        return said
+    if not held:
+        return said + ("; the input is empty again, which is what a page that "
+                       "uploads on change and then resets the input does - check "
+                       "the page for the files")
+    return said + f"; the input now holds: {', '.join(held)}"
+
+
+async def _held(read):
+    """What the input holds after the upload, or None when it cannot be read
+    (a page that replaced the input once it had the files)."""
+    with swallow("an input the page replaced after taking the files"):
+        return await read
+    return None
 
 
 async def press_key(session, key: str) -> str:
