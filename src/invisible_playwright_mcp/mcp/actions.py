@@ -917,6 +917,11 @@ DOWNLOAD_TIMEOUT_MAX_S = 300
 #: arrived this long without a saved one, the shown copy is taken.
 SAVED_COPY_GRACE_S = 2.0
 _POLL_S = 0.25
+#: A shown document whose body cannot be read yet is asked again this many
+#: times, a second apart, before the saved copy is all that is waited for. A
+#: download diverted to disk never has a body; a document still settling in a
+#: tab the site just opened can fail the first read and answer the next.
+BODY_TRIES = 3
 
 
 def download_dirs(env=None) -> list[str]:
@@ -1108,12 +1113,14 @@ async def _press_at(page, x: float, y: float) -> None:
     await page.mouse.up()
 
 
-async def _arrival(session, landing: str, before: set, shown: list, deadline: float):
+async def _arrival(session, landing: str, before: set, shown: list, deadline: float,
+                   failures: list):
     """Wait for the file: ("download", path) once the browser has saved one
     and its size has held for a poll, or ("page", (body, response)) once the
     click showed a document and no saved copy followed it."""
     sizes: dict = {}
     shown_at = None
+    tries = 0
     while time.monotonic() < deadline:
         for path, size in landed(landing, before):
             if sizes.get(path) == size:
@@ -1125,11 +1132,16 @@ async def _arrival(session, landing: str, before: set, shown: list, deadline: fl
                 response = shown[-1]
                 try:
                     return "page", (await response.body(), response)
-                except Exception:
-                    # A download the browser diverted to disk has no body to
-                    # read here; its saved copy is what to wait for.
-                    shown.pop()
-                    shown_at = None
+                except Exception as exc:
+                    tries += 1
+                    failures.append(f"{response.url}: {exc}".splitlines()[0][:200])
+                    if tries < BODY_TRIES:
+                        shown_at = time.monotonic() - SAVED_COPY_GRACE_S + 1.0
+                    else:
+                        # A download the browser diverted to disk has no body
+                        # to read here; its saved copy is what to wait for.
+                        shown.pop()
+                        shown_at, tries = None, 0
         await asyncio.sleep(_POLL_S)
     return None, None
 
@@ -1152,6 +1164,7 @@ async def download(session, selector=None, x=None, y=None,
     pages_before = set(map(id, session.pages()))
     before = set(os.listdir(landing))
     shown: list = []
+    failures: list = []
 
     def on_response(response) -> None:
         with swallow("a response whose headers cannot be read is not a document"):
@@ -1166,16 +1179,28 @@ async def download(session, selector=None, x=None, y=None,
         else:
             await _press_at(page, float(x), float(y))
         how, got = await _arrival(session, landing, before, shown,
-                                  time.monotonic() + float(timeout_seconds))
+                                  time.monotonic() + float(timeout_seconds), failures)
     finally:
         with swallow("a context already gone has no listener to remove"):
             context.remove_listener("response", on_response)
 
     if how is None:
+        # ⛔ SAY WHAT THE CLICK DID OPEN. "Nothing arrived" over a tab that is
+        # sitting on a PDF reads as a dead link, and sends the next attempt
+        # after the wrong cause.
+        seen = []
+        for opened in [p for p in session.pages() if id(p) not in pages_before]:
+            kind = ""
+            with swallow("a tab that will not answer is reported by its url alone"):
+                kind = await asyncio.wait_for(opened.evaluate("document.contentType"), 5)
+            seen.append(f"a new tab is on {opened.url}" + (f" showing {kind}" if kind else ""))
+        if failures:
+            seen.append("the shown document's body could not be read: " + failures[-1])
         raise RuntimeError(
             f"clicking {selector or f'({x}, {y})'} neither saved a file nor showed "
-            f"one within {float(timeout_seconds):g} s; nothing was saved. "
-            "browser_snapshot shows what the click did instead")
+            f"one within {float(timeout_seconds):g} s; nothing was saved"
+            + (". " + "; ".join(seen) if seen else "")
+            + ". browser_snapshot shows what the click did instead")
 
     if how == "download":
         saved = save_download(directory, safe_filename(os.path.basename(got)),

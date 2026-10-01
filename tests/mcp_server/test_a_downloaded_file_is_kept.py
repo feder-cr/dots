@@ -455,3 +455,48 @@ def test_every_shape_of_hand_over_is_kept(url, root, monkeypatch):
             assert out["size"] == len(PDF), sel
     after_home = set(os.listdir(home)) if os.path.isdir(home) else set()
     assert after_home == before_home, "a download still went to ~/Downloads"
+
+
+class _Flaky(_Response):
+    def __init__(self, *a, fail_first=1, **kw):
+        super().__init__(*a, **kw)
+        self.left = fail_first
+
+    async def body(self):
+        if self.left:
+            self.left -= 1
+            raise RuntimeError('Request "17" is not found')
+        return self._body
+
+
+def test_a_body_that_fails_once_is_asked_again(env):
+    root, landing = env
+
+    async def settles(page):
+        for fn in page.context.listeners:
+            fn(_Flaky("https://cdn.example/doc.pdf", {"content-type": "application/pdf"}))
+
+    out = _download(_Session(landing, settles), selector="#aug", timeout_seconds=5)
+    assert out["from"] == "the document the page showed"
+
+
+def test_a_failure_says_what_the_click_opened(env):
+    root, landing = env
+
+    class _Tab:
+        url = "https://cdn.example/doc.pdf"
+
+        async def evaluate(self, js):
+            return "application/pdf"
+
+    async def opens(page):
+        page.session.extra.append(_Tab())
+        for fn in page.context.listeners:
+            fn(_Flaky("https://cdn.example/doc.pdf", {"content-type": "application/pdf"},
+                      fail_first=99))
+
+    with pytest.raises(RuntimeError) as err:
+        _download(_Session(landing, opens), selector="#aug", timeout_seconds=1.5)
+    said = str(err.value)
+    assert "a new tab is on https://cdn.example/doc.pdf showing application/pdf" in said
+    assert 'could not be read: https://cdn.example/doc.pdf: Request "17" is not found' in said
