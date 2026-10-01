@@ -167,6 +167,7 @@ const VERB = {
   browser_evaluate:['Evaluating','Evaluated'], browser_take_screenshot:['Capturing','Captured'],
   browser_watch:['Watching','Watched'],
   browser_select_option:['Choosing','Chose'],
+  browser_upload_files:['Uploading','Uploaded'],
   browser_open:['Opening browser','Opened browser'],
   browser_close:['Closing browser','Closed browser'],
   browser_list:['Listing browsers','Listed browsers'],

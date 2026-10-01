@@ -265,7 +265,7 @@ EXPECTED_TOOLS = {
     "browser_snapshot", "browser_read_html", "browser_take_screenshot",
     "browser_watch",
     "browser_click", "browser_click_at", "browser_type", "browser_press_key",
-    "browser_evaluate", "browser_select_option",
+    "browser_evaluate", "browser_select_option", "browser_upload_files",
 }
 
 
