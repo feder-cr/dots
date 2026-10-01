@@ -401,3 +401,34 @@ def test_old_snapshots_expire_and_fresh_ones_stay(allowed, private_tmp):
     new, = actions.snapshot_files(real, env=_env(allowed))
     assert not os.path.exists(old_root)
     assert os.path.exists(new)
+
+
+def test_several_files_have_a_budget_together(allowed, private_tmp, monkeypatch):
+    two = [str(allowed / "a.pdf"), str(allowed / "b.pdf")]
+    monkeypatch.setattr(actions, "UPLOAD_MAX_TOTAL_BYTES", 15)
+    with pytest.raises(ValueError, match="together"):
+        actions.uploadable(two, env=_env(allowed))
+    monkeypatch.setattr(actions, "UPLOAD_MAX_TOTAL_BYTES", 20)
+    real = actions.uploadable(two, env=_env(allowed))
+    (allowed / "b.pdf").write_bytes(b"%PDF-1.4 b grew")
+    with pytest.raises(ValueError, match="together"):
+        actions.snapshot_files(real, env=_env(allowed))
+    assert os.listdir(private_tmp) == []
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="the kernel's own record of an open file")
+def test_a_file_unlinked_while_copied_keeps_its_name(allowed, private_tmp, monkeypatch):
+    """A cleanup that deletes the staged file between open and copy: the
+    descriptor still holds what was checked, and its readback gains the
+    kernel's " (deleted)" mark, which must never reach the upload's name."""
+    opened = actions._opened_path
+
+    def unlinked_meanwhile(fd, real, st):
+        os.unlink(real)
+        return opened(fd, real, st)
+
+    monkeypatch.setattr(actions, "_opened_path", unlinked_meanwhile)
+    real = actions.uploadable([str(allowed / "a.pdf")], env=_env(allowed))
+    copy, = actions.snapshot_files(real, env=_env(allowed))
+    assert os.path.basename(copy) == "a.pdf"
+    assert open(copy, "rb").read() == b"%PDF-1.4 a"
