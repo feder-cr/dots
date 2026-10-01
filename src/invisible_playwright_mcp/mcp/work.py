@@ -203,6 +203,12 @@ class Work:
         #: talk to this server at the same time, and two opens of one role
         #: racing would leave a browser nobody holds a handle to.
         self._lock = asyncio.Lock()
+        #: One lock per browser around the commands that drive its input. A
+        #: page has one focus and one keyboard, so two browser_type calls at
+        #: once interleaved their keystrokes into one field
+        #: ("BBAAABABBABAB...", 2026-09-30) and could hang the engine. They
+        #: queue instead. Reads and the live pane's frames do not take it.
+        self._input_locks: dict[str, asyncio.Lock] = {}
 
     # --- what is here -----------------------------------------------------------
 
@@ -487,7 +493,8 @@ class Work:
         return session
 
     async def acting(self, fn: Callable[..., Awaitable], *args,
-                     role: Optional[str] = None, **kwargs):
+                     role: Optional[str] = None, exclusive: bool = False,
+                     **kwargs):
         """Run one action on one open browser. The one funnel every tool that
         touches a page goes through, so "what a browser has to be before a
         tool may use it" is a fact known in one place.
@@ -499,6 +506,15 @@ class Work:
         Any other failure is the page's answer and passes through untouched.
         """
         at = role or DEFAULT_BROWSER_ID
+        if exclusive:
+            lock = self._input_locks.setdefault(at, asyncio.Lock())
+            async with lock:
+                return await self._act(at, fn, *args, **kwargs)
+        return await self._act(at, fn, *args, **kwargs)
+
+    async def _act(self, at: str, fn, *args, **kwargs):
+        # The browser is looked up after any queue, so one closed while a
+        # command waited is reported as gone rather than used.
         session = self.session(at)
         # ⛔ AFTER THE BROWSER ANSWERED FOR ITSELF, NOT BEFORE. `session`
         # refuses a role that is not open and forgets one that is gone, so

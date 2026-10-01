@@ -441,7 +441,7 @@ async def browser_navigate(url: str, wait_until: str = "domcontentloaded",
     or "networkidle" for a single-page app that fetches its content after
     load."""
     return await work.acting(actions.navigate, url, wait_until=wait_until,
-                             role=browser)
+                             role=browser, exclusive=True)
 
 
 @mcp.tool(annotations=_says("Read the page text", read_only=True))
@@ -562,7 +562,7 @@ async def browser_click(selector: str, browser: Browser = None) -> str:
     Scrolls it into view and waits for it to be clickable. When no selector can
     describe the target, use browser_click_at with coordinates from
     browser_snapshot."""
-    return await work.acting(actions.click, selector, role=browser)
+    return await work.acting(actions.click, selector, role=browser, exclusive=True)
 
 
 @mcp.tool(annotations=_says("Click at a point", destructive=True))
@@ -585,7 +585,7 @@ async def browser_click_at(x: float, y: float, hold_seconds: float = 0.0,
     # happened, on the one tool that exists for sliders and press-and-hold
     # challenges. The floor in pyproject.toml is set accordingly. Said here and
     # not in the description above, which the API cuts at 1024 characters.
-    png = await work.acting(actions.click_at, x, y, hold_seconds, role=browser)
+    png = await work.acting(actions.click_at, x, y, hold_seconds, role=browser, exclusive=True)
     return Image(data=png, format="png")
 
 
@@ -593,10 +593,12 @@ async def browser_click_at(x: float, y: float, hold_seconds: float = 0.0,
 async def browser_type(selector: str, text: str, browser: Browser = None) -> str:
     """Fill a field, replacing whatever it holds.
 
-    This sets the value rather than typing key by key, so it will not fire the
-    per-keystroke handlers an autocomplete needs. For those, click the field and
-    use browser_press_key."""
-    return await work.acting(actions.type_text, selector, text, role=browser)
+    Up to 80 characters are typed key by key at a human pace (about 0.4 s a
+    character). Longer text goes in at once, as a paste does: no key events,
+    one trusted input event, and the field's maxlength applies. Calls that act
+    on the same browser run one at a time, in order."""
+    return await work.acting(actions.type_text, selector, text, role=browser,
+                             exclusive=True)
 
 
 @mcp.tool(annotations=_says("Choose a dropdown option", destructive=True))
@@ -609,14 +611,14 @@ async def browser_select_option(selector: str, value: str,
     plus arrows cannot tell you which row it landed on, and setting the value
     through browser_evaluate changes it without the page seeing a real
     interaction."""
-    return await work.acting(actions.select_option, selector, value, role=browser)
+    return await work.acting(actions.select_option, selector, value, role=browser, exclusive=True)
 
 
 @mcp.tool(annotations=_says("Press a key", destructive=True))
 async def browser_press_key(key: str, browser: Browser = None) -> str:
     """Press a key on whatever has focus: "Enter", "Tab", "Escape",
     "ArrowDown", "Control+a", or a single character."""
-    return await work.acting(actions.press_key, key, role=browser)
+    return await work.acting(actions.press_key, key, role=browser, exclusive=True)
 
 
 @mcp.tool(annotations=_says("Read the page with JavaScript", read_only=True))
