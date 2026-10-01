@@ -98,6 +98,24 @@ def test_relative_paths_and_bad_shapes_are_refused(allowed, monkeypatch):
         actions.uploadable([str(allowed / "a.pdf")], env={actions.UPLOAD_DIRS_ENV: "up"})
 
 
+def test_a_root_that_is_a_symlink_turns_uploads_off(allowed, tmp_path):
+    """Replacing the staging directory with a link to its parent must not
+    widen uploads to the parent's whole tree."""
+    link = tmp_path / "staging"
+    link.symlink_to(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("x")
+    with pytest.raises(RuntimeError, match="uploads are off"):
+        actions.uploadable([str(secret)], env=_env(link))
+    with pytest.raises(RuntimeError, match="uploads are off"):
+        actions.uploadable([str(allowed / "a.pdf")], env=_env(allowed, link))
+
+
+def test_a_root_that_does_not_exist_turns_uploads_off(tmp_path):
+    with pytest.raises(RuntimeError, match="uploads are off"):
+        actions.uploadable(["/x"], env=_env(tmp_path / "missing"))
+
+
 def test_a_file_over_the_limit_is_refused(allowed, monkeypatch):
     monkeypatch.setattr(actions, "UPLOAD_MAX_BYTES", 4)
     with pytest.raises(ValueError, match="over the"):
