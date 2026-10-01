@@ -164,7 +164,8 @@ through the real pointer and the real keyboard.
 Try things in this order. It matters, because a page can tell the difference.
 
 1. A named tool with a selector: browser_click, browser_type,
-   browser_select_option, browser_press_key, browser_upload_files.
+   browser_select_option, browser_press_key, browser_upload_files,
+   browser_download.
    browser_snapshot gives you the selector for each element - pass it
    verbatim, it is built to be unambiguous.
 
@@ -629,6 +630,27 @@ async def browser_upload_files(selector: str, paths: list[str],
     listed, uploads are off. Never use browser_evaluate to set `files`."""
     return await work.acting(actions.upload_files, selector, paths, role=browser,
                              exclusive=True)
+
+
+@mcp.tool(annotations=_says("Download a file", destructive=True))
+async def browser_download(selector: str | None = None, x: float | None = None,
+                           y: float | None = None, timeout_seconds: float = 30,
+                           save_to: str | None = None,
+                           browser: Browser = None) -> str:
+    """Click what makes the page hand over a file, and save that file.
+
+    Give the link or button's `selector`, or `x` and `y` from browser_snapshot.
+    The real pointer clicks it; then whichever comes first within
+    `timeout_seconds` is kept: the file the browser downloads, or the document
+    the click shows (a PDF opening in the viewer, in this tab or a new one),
+    taken from what the browser received - not a screenshot. A tab opened
+    only to show the file is closed again.
+
+    Saved under `save_to` (absolute; made if missing), which must lie inside a
+    directory listed in INVISIBLE_MCP_DOWNLOAD_DIRS, or in the first of them.
+    Never overwrites. Answers JSON: saved, filename, size, mime, sha256, url."""
+    return await work.acting(actions.download, selector, x, y, timeout_seconds,
+                             save_to, role=browser, exclusive=True)
 
 
 @mcp.tool(annotations=_says("Press a key", destructive=True))

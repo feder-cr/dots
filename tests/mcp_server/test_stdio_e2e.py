@@ -126,7 +126,7 @@ async def test_every_tool_reaches_the_wire_with_its_hints():
     additive = set()
     acts = {"browser_open", "browser_close", "browser_navigate", "browser_click",
             "browser_click_at", "browser_type", "browser_select_option",
-            "browser_press_key", "browser_upload_files"}
+            "browser_press_key", "browser_upload_files", "browser_download"}
     async with stdio_client(server_params()) as (read, write):
         async with ClientSession(read, write) as mcp:
             await mcp.initialize()

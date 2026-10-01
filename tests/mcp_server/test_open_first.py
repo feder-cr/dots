@@ -112,6 +112,7 @@ EVERY_TOOL = [
     ("browser_select_option", {"selector": "#s", "value": "a"}),
     ("browser_press_key", {"key": "Enter"}),
     ("browser_upload_files", {"selector": "#f", "paths": ["/tmp/a.pdf"]}),
+    ("browser_download", {"selector": "#statement"}),
     ("browser_evaluate", {"expression": "1"}),
     ("browser_status", {}),
 ]

@@ -14,13 +14,17 @@ acts on it.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import mimetypes
 import os
 import re
 import shutil
 import stat
 import tempfile
 import time
+import urllib.parse
 from typing import Any
 
 from . import clean
@@ -674,22 +678,7 @@ def upload_dirs(env=None) -> list[str]:
     tree, silently. An entry whose real path is not itself (a link anywhere in
     it, or a directory that does not exist) turns uploads off with the reason.
     """
-    raw = (os.environ if env is None else env).get(UPLOAD_DIRS_ENV, "")
-    dirs = []
-    for entry in (e.strip() for e in raw.split(os.pathsep)):
-        if not entry:
-            continue
-        if not os.path.isabs(entry):
-            raise RuntimeError(
-                f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not an absolute path")
-        named = os.path.normpath(entry)
-        real = os.path.realpath(named)
-        if real != named or not os.path.isdir(real):
-            raise RuntimeError(
-                f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not a directory at "
-                f"that exact path (it resolves to {real!r}); uploads are off")
-        dirs.append(real)
-    return dirs
+    return _named_dirs(UPLOAD_DIRS_ENV, "uploads", env)
 
 
 def uploadable(paths, env=None) -> list[str]:
@@ -896,6 +885,328 @@ async def _held(read):
     with swallow("an input the page replaced after taking the files"):
         return await read
     return None
+
+
+
+# ── files the page hands over ──────────────────────────────────────────────
+#
+# ⛔ A FILE A PAGE HANDED OVER WAS NOWHERE ANY TOOL COULD REACH. A bank's
+# "August 2026" statement link (measured 2026-10-01) was clicked and nothing
+# came back: the engine's Firefox saves through its own download manager, which
+# put files in ~/Downloads, and Juggler's download events never fire in this
+# build, so `expect_download` waits forever. A PDF the browser can show is not
+# saved at all - it opens in the viewer, often in a tab of its own - and a
+# screenshot of the viewer is a picture of a statement, not the statement.
+#
+# So this does what a person does and keeps what they would keep: the real
+# pointer clicks the link, and whichever arrives is taken - the file the
+# browser saved (into the browser's private directory; see
+# `StealthSession.start`) or the document the click showed, read from the
+# response the browser itself received. Nothing is fetched a second time.
+#
+# ⛔ AND IT WRITES ONLY WHERE SOMEBODY SAID FILES MAY BE WRITTEN, for the same
+# reason uploads read only from named directories: the path comes from a model
+# that has been reading pages.
+
+#: The directories downloaded files may be saved into, separated by os.pathsep.
+#: The first is where a file goes when the call names none.
+DOWNLOAD_DIRS_ENV = "INVISIBLE_MCP_DOWNLOAD_DIRS"
+DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024
+DOWNLOAD_TIMEOUT_MAX_S = 300
+#: A PDF attachment is both shown in a tab and saved; once the shown copy has
+#: arrived this long without a saved one, the shown copy is taken.
+SAVED_COPY_GRACE_S = 2.0
+_POLL_S = 0.25
+
+
+def download_dirs(env=None) -> list[str]:
+    """The directories named in INVISIBLE_MCP_DOWNLOAD_DIRS, held to the same
+    rules as the upload ones: absolute, and each its own real path."""
+    return _named_dirs(DOWNLOAD_DIRS_ENV, "downloads", env)
+
+
+def download_target(save_to=None, env=None) -> str:
+    """The directory a download is saved into, made if it is missing, or the
+    reason it may not be. Decided BEFORE anything is clicked."""
+    dirs = download_dirs(env)
+    if not dirs:
+        raise RuntimeError(
+            f"downloads are off: {DOWNLOAD_DIRS_ENV} names no directory files "
+            "may be saved into")
+    if not save_to:
+        return dirs[0]
+    if not isinstance(save_to, str) or not os.path.isabs(save_to):
+        raise ValueError(f"save_to {save_to!r} is not an absolute directory path")
+    named = os.path.normpath(save_to)
+    home = _home(named, dirs)
+    if home is None:
+        raise PermissionError(
+            f"{save_to} is not inside a directory downloads may be saved into "
+            f"({os.pathsep.join(dirs)})")
+    _no_hidden(save_to, named, home)
+    rel = os.path.relpath(named, home)
+    here = home
+    for part in ([] if rel == "." else rel.split(os.sep)):
+        here = os.path.join(here, part)
+        with swallow("a directory that is already there is the one wanted"):
+            os.mkdir(here, 0o700)
+        if not stat.S_ISDIR(os.lstat(here).st_mode):
+            raise PermissionError(
+                f"{here} is not a directory (a link or a file); nothing saved")
+    if os.path.realpath(named) != named:
+        raise PermissionError(f"{save_to} resolves somewhere else; nothing saved")
+    if not os.access(named, os.W_OK | os.X_OK):
+        raise PermissionError(f"{save_to} is not writable")
+    return named
+
+
+def _named_dirs(var: str, what: str, env=None) -> list[str]:
+    raw = (os.environ if env is None else env).get(var, "")
+    dirs = []
+    for entry in (e.strip() for e in raw.split(os.pathsep)):
+        if not entry:
+            continue
+        if not os.path.isabs(entry):
+            raise RuntimeError(f"{var} names {entry!r}, which is not an absolute path")
+        named = os.path.normpath(entry)
+        real = os.path.realpath(named)
+        if real != named or not os.path.isdir(real):
+            raise RuntimeError(
+                f"{var} names {entry!r}, which is not a directory at that exact "
+                f"path (it resolves to {real!r}); {what} are off")
+        dirs.append(real)
+    return dirs
+
+
+def safe_filename(name, fallback: str = "download") -> str:
+    """A file name a page suggested, made safe to create: its last path
+    component only, no control or reserved characters, no leading dot, and
+    short enough for any filesystem."""
+    name = os.path.basename(str(name or "").replace("\\", "/"))
+    name = "".join(c for c in name if c.isprintable() and c not in '<>:"/|?*')
+    name = name.strip().lstrip(".").strip() or fallback
+    while len(name.encode("utf-8")) > 200:
+        stem, ext = os.path.splitext(name)
+        name = (stem[:-8] or stem[:1]) + ext[:16]
+    return name
+
+
+def _disposition_name(header: str):
+    """The file name a Content-Disposition header gives, preferring the
+    RFC 5987 `filename*` form."""
+    if not header:
+        return None
+    star = re.search(r"filename\*\s*=\s*([^']*)'[^']*'([^;]+)", header, re.I)
+    if star:
+        with swallow("an undecodable filename* falls back to filename"):
+            return urllib.parse.unquote(star.group(2).strip().strip('"'),
+                                        encoding=star.group(1) or "utf-8",
+                                        errors="strict")
+    plain = re.search(r'filename\s*=\s*"([^"]*)"|filename\s*=\s*([^;]+)', header, re.I)
+    if plain:
+        return (plain.group(1) if plain.group(1) is not None else plain.group(2)).strip()
+    return None
+
+
+_MAGIC = ((b"%PDF-", "application/pdf"), (b"\x89PNG\r\n\x1a\n", "image/png"),
+          (b"\xff\xd8\xff", "image/jpeg"), (b"GIF8", "image/gif"))
+
+
+def sniff_mime(head: bytes, name: str, declared=None) -> str:
+    """What the bytes are: their own signature first, then the name, then what
+    the server said."""
+    for magic, mime in _MAGIC:
+        if head.startswith(magic):
+            return mime
+    return (mimetypes.guess_type(name)[0]
+            or (declared or "").split(";")[0].strip()
+            or "application/octet-stream")
+
+
+def _create_new(directory: str, name: str):
+    """Open a file that did not exist, under `name` or `name (n)`."""
+    stem, ext = os.path.splitext(name)
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    for n in range(1000):
+        path = os.path.join(directory, name if n == 0 else f"{stem} ({n}){ext}")
+        try:
+            return path, os.open(path, flags, 0o600)
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"{directory} already holds a thousand files named {name}")
+
+
+def save_download(directory: str, name: str, chunks) -> dict:
+    """Write `chunks` to a NEW file in `directory`, never over an existing
+    one, and describe what was written."""
+    path, fd = _create_new(directory, name)
+    digest, size, head = hashlib.sha256(), 0, b""
+    try:
+        with os.fdopen(fd, "wb") as out:
+            for chunk in chunks:
+                size += len(chunk)
+                if size > DOWNLOAD_MAX_BYTES:
+                    raise ValueError(f"the file is over the {DOWNLOAD_MAX_BYTES}-byte "
+                                     "limit; nothing was saved")
+                if len(head) < 16:
+                    head += chunk[:16 - len(head)]
+                digest.update(chunk)
+                out.write(chunk)
+    except BaseException:
+        with swallow("a partial file that cannot be removed is reported by the raise"):
+            os.unlink(path)
+        raise
+    return {"path": path, "filename": os.path.basename(path), "size": size,
+            "sha256": digest.hexdigest(), "head": head}
+
+
+def _read_chunks(path: str):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    with os.fdopen(fd, "rb") as f:
+        while chunk := f.read(1 << 20):
+            yield chunk
+
+
+def landed(directory: str, before: set) -> list[tuple[str, int]]:
+    """Files the browser has saved into `directory` since `before`: regular
+    files with no `.part` beside them, as (path, size)."""
+    with swallow("a directory the browser removed holds nothing"):
+        names = os.listdir(directory)
+        busy = {n[:-5] for n in names if n.endswith(".part")}
+        out = []
+        for name in names:
+            if name in before or name.endswith(".part") or name in busy:
+                continue
+            path = os.path.join(directory, name)
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode):
+                out.append((path, st.st_size))
+        return out
+    return []
+
+
+def _is_document(response) -> bool:
+    headers = response.headers
+    kind = (headers.get("content-type") or "").split(";")[0].strip().lower()
+    return (kind in ("application/pdf", "application/octet-stream")
+            or "attachment" in (headers.get("content-disposition") or "").lower())
+
+
+def _response_name(response) -> str:
+    named = _disposition_name(response.headers.get("content-disposition") or "")
+    if not named:
+        path = urllib.parse.urlsplit(response.url).path
+        named = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+    return safe_filename(named)
+
+
+async def _press_at(page, x: float, y: float) -> None:
+    """The click of browser_click_at, without its screenshot."""
+    await page.mouse.move(x, y, steps=12)
+    await page.mouse.down()
+    await page.mouse.up()
+
+
+async def _arrival(session, landing: str, before: set, shown: list, deadline: float):
+    """Wait for the file: ("download", path) once the browser has saved one
+    and its size has held for a poll, or ("page", (body, response)) once the
+    click showed a document and no saved copy followed it."""
+    sizes: dict = {}
+    shown_at = None
+    while time.monotonic() < deadline:
+        for path, size in landed(landing, before):
+            if sizes.get(path) == size:
+                return "download", path
+            sizes[path] = size
+        if shown:
+            shown_at = shown_at or time.monotonic()
+            if time.monotonic() - shown_at >= SAVED_COPY_GRACE_S:
+                response = shown[-1]
+                try:
+                    return "page", (await response.body(), response)
+                except Exception:
+                    # A download the browser diverted to disk has no body to
+                    # read here; its saved copy is what to wait for.
+                    shown.pop()
+                    shown_at = None
+        await asyncio.sleep(_POLL_S)
+    return None, None
+
+
+async def download(session, selector=None, x=None, y=None,
+                   timeout_seconds: float = 30, save_to=None) -> str:
+    """Click what hands over a file, and save the file it hands over."""
+    by_point = x is not None or y is not None
+    if bool(selector) == by_point or (by_point and (x is None or y is None)):
+        raise ValueError("give either selector, or both x and y")
+    if not 0 < float(timeout_seconds) <= DOWNLOAD_TIMEOUT_MAX_S:
+        raise ValueError(f"timeout_seconds is above 0 and at most {DOWNLOAD_TIMEOUT_MAX_S}")
+    directory = download_target(save_to)
+    landing = getattr(session, "downloads", None)
+    if not landing or not os.path.isdir(landing):
+        raise RuntimeError("this browser was opened without a download directory; "
+                           "browser_close it and browser_open it again")
+
+    page = session.page()
+    pages_before = set(map(id, session.pages()))
+    before = set(os.listdir(landing))
+    shown: list = []
+
+    def on_response(response) -> None:
+        with swallow("a response whose headers cannot be read is not a document"):
+            if _is_document(response):
+                shown.append(response)
+
+    context = page.context
+    context.on("response", on_response)
+    try:
+        if selector:
+            await click(session, selector)
+        else:
+            await _press_at(page, float(x), float(y))
+        how, got = await _arrival(session, landing, before, shown,
+                                  time.monotonic() + float(timeout_seconds))
+    finally:
+        with swallow("a context already gone has no listener to remove"):
+            context.remove_listener("response", on_response)
+
+    if how is None:
+        raise RuntimeError(
+            f"clicking {selector or f'({x}, {y})'} neither saved a file nor showed "
+            f"one within {float(timeout_seconds):g} s; nothing was saved. "
+            "browser_snapshot shows what the click did instead")
+
+    if how == "download":
+        saved = save_download(directory, safe_filename(os.path.basename(got)),
+                              _read_chunks(got))
+        with swallow("the browser's own copy goes with the browser either way"):
+            os.unlink(got)
+        url, declared = "", None
+    else:
+        body, response = got
+        url, declared = response.url, response.headers.get("content-type")
+        name = _response_name(response)
+        if not os.path.splitext(name)[1]:
+            name += mimetypes.guess_extension(sniff_mime(body[:16], name, declared)) or ""
+        saved = save_download(directory, name, [body])
+
+    notes = []
+    for opened in [p for p in session.pages() if id(p) not in pages_before]:
+        # A tab the click opened only to show or start the file goes, so the
+        # page a command drives is the one the click was made on again.
+        if opened.url in ("about:blank", url) or how == "download":
+            with swallow("a tab the site already closed"):
+                await opened.close()
+                notes.append("closed the tab the file opened in")
+    if how == "page" and page.url == url:
+        notes.append("this page now shows the file; browser_navigate to leave it")
+    return json.dumps({
+        "saved": saved["path"], "filename": saved["filename"], "size": saved["size"],
+        "mime": sniff_mime(saved["head"], saved["filename"], declared),
+        "sha256": saved["sha256"],
+        "from": "the browser's download" if how == "download" else "the document the page showed",
+        "url": url, "notes": notes}, ensure_ascii=False)
 
 
 async def press_key(session, key: str) -> str:
