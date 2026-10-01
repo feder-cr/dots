@@ -949,6 +949,10 @@ UPLOAD_DIRS_ENV = "INVISIBLE_MCP_UPLOAD_DIRS"
 #: disk image should not take the browser down with it.
 UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 UPLOAD_MAX_FILES = 20
+#: All the files of one call together. Each is copied into a snapshot inside
+#: the one shared browser process and kept for an hour, so twenty files at the
+#: per-file limit would be a gigabyte copied and held for one call.
+UPLOAD_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 #: How long the click has to open a chooser before the selector is reported as
 #: not the thing that opens one.
 CHOOSER_MS = 10_000
@@ -1011,7 +1015,7 @@ def uploadable(paths, env=None) -> list[str]:
         raise RuntimeError(
             f"uploads are off: {UPLOAD_DIRS_ENV} names no directory files may be "
             "uploaded from")
-    out = []
+    out, total = [], 0
     for path in paths:
         if not isinstance(path, str) or not os.path.isabs(path):
             raise ValueError(f"{path!r} is not an absolute path")
@@ -1035,6 +1039,10 @@ def uploadable(paths, env=None) -> list[str]:
             raise PermissionError(f"{path} is not readable")
         if real in out:
             raise ValueError(f"{path} is named twice")
+        total += st.st_size
+        if total > UPLOAD_MAX_TOTAL_BYTES:
+            raise ValueError(f"these files come to more than {UPLOAD_MAX_TOTAL_BYTES} "
+                             "bytes together; upload them in more than one call")
         out.append(real)
     return out
 
@@ -1055,7 +1063,12 @@ def _opened_path(fd: int, real: str, st) -> str:
     the name must still lead to the very file that was opened."""
     proc = f"/proc/self/fd/{fd}"
     if os.path.islink(proc):
-        return os.readlink(proc)
+        where = os.readlink(proc)
+        # A file unlinked after it was opened is still the file that was
+        # opened; the kernel marks its old name rather than giving it a new one.
+        if where.endswith(" (deleted)") and os.fstat(fd).st_nlink == 0:
+            where = where[: -len(" (deleted)")]
+        return where
     now = os.stat(real)
     if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
         raise PermissionError(f"{real} changed while it was being read; not sent")
@@ -1085,7 +1098,7 @@ def snapshot_files(files: list[str], env=None) -> list[str]:
     _expire_snapshots()
     root = tempfile.mkdtemp(prefix=_SNAPSHOT_PREFIX)
     try:
-        out = []
+        out, total = [], 0
         for i, real in enumerate(files):
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
             try:
@@ -1104,15 +1117,22 @@ def snapshot_files(files: list[str], env=None) -> list[str]:
                         f"{real} is no longer inside a directory uploads may come from; not sent")
                 _no_hidden(real, actual, home)
                 os.makedirs(os.path.join(root, str(i)), mode=0o700)
-                dest = os.path.join(root, str(i), os.path.basename(actual))
-                total = 0
+                # The name checked and shown is the one the caller gave, never
+                # one read back from the descriptor: that can carry the
+                # kernel's " (deleted)" mark, and a portal checks extensions.
+                dest = os.path.join(root, str(i), os.path.basename(real))
+                size = 0
                 with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                        | getattr(os, "O_BINARY", 0), 0o600), "wb") as copy:
                     while chunk := os.read(fd, 1 << 20):
+                        size += len(chunk)
                         total += len(chunk)
-                        if total > UPLOAD_MAX_BYTES:
+                        if size > UPLOAD_MAX_BYTES:
                             raise ValueError(f"{real} is over the {UPLOAD_MAX_BYTES}-byte "
                                              "limit for one file")
+                        if total > UPLOAD_MAX_TOTAL_BYTES:
+                            raise ValueError(f"these files came to more than "
+                                             f"{UPLOAD_MAX_TOTAL_BYTES} bytes together")
                         copy.write(chunk)
                 out.append(dest)
             finally:
