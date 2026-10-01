@@ -571,10 +571,51 @@ async def click_at(session, x: float, y: float, hold_seconds: float = 0.0) -> by
     return await page.screenshot()
 
 
+#: The longest text typed key by key. The engine types at the session's
+#: human rhythm, measured at about 385 ms a character, so 1,330 characters
+#: took over eight minutes and the call was cut off at the MCP timeout with
+#: 890 still to go (2026-09-30). 80 characters is about half a minute at that
+#: rate. Anything longer goes in the way a paste does: see _insert_long_text.
+KEYSTROKE_LIMIT = 80
+
+
+async def _insert_long_text(session, selector: str, text: str) -> str:
+    """Put text too long to type into a field in one step, as a paste would.
+
+    The field is cleared through fill, which focuses it and sends trusted
+    input and change events without keystrokes, and the text then goes in
+    through the keyboard's insert_text: one trusted beforeinput/input pair,
+    no key events, and the field's own maxlength applies. The value is read
+    back, because "typed" is a claim about the field, not about the call.
+    """
+    page = session.page()
+    await page.fill(selector, "", timeout=15_000)
+    await page.keyboard.insert_text(text)
+    try:
+        value = await page.locator(selector).input_value(timeout=5_000)
+    except Exception:
+        return (f"inserted {len(text)} characters into {selector}; not read back, "
+                "because it is not a form field")
+    if value == text:
+        return f"typed into {selector} ({len(text)} characters, inserted at once)"
+    if text.startswith(value) and value:
+        raise RuntimeError(
+            f"{selector} kept the first {len(value)} of {len(text)} characters "
+            "and took no more, which is what a maxlength does. Shorten the text "
+            "and type it again.")
+    raise RuntimeError(
+        f"after inserting {len(text)} characters, {selector} holds {len(value)} "
+        "that are not the text sent: the focus may have moved. Read the field "
+        "before typing again.")
+
+
 async def type_text(session, selector: str, text: str) -> str:
-    await _on_selector(session, selector, "typing",
-                       lambda: session.page().fill(selector, text, timeout=15_000))
-    return f"typed into {selector}"
+    if len(text) <= KEYSTROKE_LIMIT:
+        await _on_selector(session, selector, "typing",
+                           lambda: session.page().fill(selector, text, timeout=15_000))
+        return f"typed into {selector}"
+    return await _on_selector(session, selector, "typing",
+                              lambda: _insert_long_text(session, selector, text))
 
 
 async def select_option(session, selector: str, value: str) -> str:
