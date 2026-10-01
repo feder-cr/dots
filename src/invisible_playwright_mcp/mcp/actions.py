@@ -665,8 +665,15 @@ _FILE_NAMES_JS = "el => el.files ? Array.from(el.files, f => f.name) : null"
 
 
 def upload_dirs(env=None) -> list[str]:
-    """The directories named in INVISIBLE_MCP_UPLOAD_DIRS, resolved. A relative
-    entry is refused rather than resolved against wherever the server started."""
+    """The directories named in INVISIBLE_MCP_UPLOAD_DIRS. A relative entry is
+    refused rather than resolved against wherever the server started.
+
+    ⛔ AND SO IS ONE THAT RESOLVES SOMEWHERE ELSE. Resolving the entry would let
+    whoever can replace it with a symlink choose the root: a staging directory
+    turned into a link to its parent widens every upload to the parent's whole
+    tree, silently. An entry whose real path is not itself (a link anywhere in
+    it, or a directory that does not exist) turns uploads off with the reason.
+    """
     raw = (os.environ if env is None else env).get(UPLOAD_DIRS_ENV, "")
     dirs = []
     for entry in (e.strip() for e in raw.split(os.pathsep)):
@@ -675,7 +682,13 @@ def upload_dirs(env=None) -> list[str]:
         if not os.path.isabs(entry):
             raise RuntimeError(
                 f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not an absolute path")
-        dirs.append(os.path.realpath(entry))
+        named = os.path.normpath(entry)
+        real = os.path.realpath(named)
+        if real != named or not os.path.isdir(real):
+            raise RuntimeError(
+                f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not a directory at "
+                f"that exact path (it resolves to {real!r}); uploads are off")
+        dirs.append(real)
     return dirs
 
 
