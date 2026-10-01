@@ -31,6 +31,8 @@ browser and installs it in the server's place.
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from invisible_playwright.async_api import TargetClosedError
@@ -89,6 +91,31 @@ REMEMBERED = "the person this session already was"
 #: round trip. Past this, the answer is "its download is starting" and the
 #: caller asks again; nothing here waits for a transfer.
 ENGINE_SETTLE_SECONDS = 10.0
+
+
+def _why_it_did_not_start(settings: dict) -> str:
+    """The cause to look at first, named from what this launch was handed.
+
+    ⛔ IT USED TO SAY "A PROXY THAT IS DOWN IS THE USUAL CAUSE" WHATEVER THE
+    LAUNCH WAS. On 2026-10-01 a helper with no proxy at all failed on a profile
+    another Firefox held, and was told to pass proxy="" - advice about something
+    it did not have, and a value some clients cannot even send.
+    """
+    directory = settings.get("profile_dir")
+    if directory:
+        lock = Path(directory) / "lock"
+        if lock.is_symlink() or (Path(directory) / ".parentlock").exists():
+            held = ""
+            with swallow("the lock's target is a detail of the message"):
+                held = " (%s)" % os.readlink(lock)
+            return (" The profile %s is locked%s: another Firefox is using it, "
+                    "and a profile serves one browser at a time. Close that "
+                    "browser, or open this one with another profile directory."
+                    % (directory, held))
+    if settings.get("proxy"):
+        return (" It was going out through %s; a proxy that is down is a common "
+                "cause, so try another exit." % settings["proxy"]["server"])
+    return ""
 
 
 class Work:
@@ -222,7 +249,8 @@ class Work:
             seed_from, exit_note, warnings = REMEMBERED, "", ()
         else:
             try:
-                chosen = plan.plan_session(seed=seed, proxy=proxy, profile=profile)
+                chosen = plan.plan_session(seed=seed, proxy=proxy, profile=profile,
+                                           helper=role == SUPPORT_BROWSER_ID)
             except (identity.IdentityConflict, ValueError) as exc:
                 # Refused, not guessed. Every case here is one where continuing
                 # would hand the caller a different person than the one they
@@ -249,6 +277,22 @@ class Work:
             if main_launched.get("proxy"):
                 settings["proxy"] = main_launched["proxy"]
             exit_note = "this machine's own address, the same as main"
+
+        other = SUPPORT_BROWSER_ID if role == DEFAULT_BROWSER_ID else DEFAULT_BROWSER_ID
+        directory = settings.get("profile_dir")
+        if (directory and other in self._open
+                and (self._launched.get(other) or {}).get("profile_dir") == directory):
+            # ⛔ REFUSED BEFORE THE LAUNCH, NOT DIAGNOSED AFTER IT. Firefox
+            # locks a profile to one process; a second one on the same
+            # directory dies before it speaks, and what reaches the caller is
+            # the engine's "the pipe is closed", not the reason.
+            raise ValueError(
+                "refused: %s already has the profile %s open, and Firefox lets "
+                "one browser use a profile at a time. %s"
+                % (other, directory,
+                   "Leave profile out for a helper that is not saved, or give "
+                   "it another directory." if role == SUPPORT_BROWSER_ID else
+                   "Close `support` first, or give main another directory."))
 
         if self._engine is not None and not self._engine.ready():
             # ⛔ AFTER THE PLAN, AND NOT A LAUNCH: AN ANSWER. A plan that is
@@ -288,10 +332,8 @@ class Work:
                 raise RuntimeError(
                     "the %s browser did NOT start: %s\n"
                     "Nothing is browsing there, and the tools will keep failing "
-                    "until browser_open succeeds. A proxy that is down is the "
-                    "usual cause; try another exit, or pass proxy=\"\" to go out "
-                    "from this machine knowing that is what you are doing."
-                    % (role, exc))
+                    "until browser_open succeeds.%s"
+                    % (role, exc, _why_it_did_not_start(settings)))
             self._open[role] = session
             self._launched[role] = settings
             # Opening a browser is working in it: a helper opened mid-task is

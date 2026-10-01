@@ -336,6 +336,70 @@ async def test_a_refused_plan_leaves_the_running_browser_alone(work):
     assert _session(work) is before and not before.closed
 
 
+# --- the helper does not take main's profile ------------------------------------
+
+async def test_the_helper_with_no_profile_does_not_take_mains_from_the_environment(
+        work, monkeypatch, tmp_path):
+    """Measured 2026-10-01: the deployment sets STEALTHFOX_PROFILE_DIR for
+    `main`, the helper read it too, and with `main` open Firefox refused the
+    locked profile - "the pipe is closed". A helper "is not saved"."""
+    shared = tmp_path / "profile"
+    monkeypatch.setenv("STEALTHFOX_PROFILE_DIR", str(shared))
+    monkeypatch.setenv("STEALTHFOX_SEED", "4242")
+    await server.browser_open()
+    assert _session(work).kwargs["profile_dir"] == str(shared.resolve())
+
+    await server.browser_open(browser="support")
+    helper = _session(work, "support").kwargs
+    assert "profile_dir" not in helper, "the helper took main's profile"
+    assert helper["seed"] != _session(work).kwargs["seed"], "the helper is main's twin"
+
+
+async def test_the_helper_can_still_be_given_a_profile_and_a_seed(work, monkeypatch, tmp_path):
+    monkeypatch.setenv("STEALTHFOX_PROFILE_DIR", str(tmp_path / "main"))
+    await server.browser_open()
+    await server.browser_open(browser="support", profile=str(tmp_path / "help"), seed=777)
+    helper = _session(work, "support").kwargs
+    assert helper["profile_dir"] == str((tmp_path / "help").resolve())
+    assert helper["seed"] == 777
+
+
+async def test_a_profile_the_other_browser_holds_is_refused_by_name(work, tmp_path):
+    shared = str(tmp_path / "profile")
+    await server.browser_open(profile=shared)
+    main = _session(work)
+
+    with pytest.raises(ValueError) as refused:
+        await server.browser_open(browser="support", profile=shared)
+    said = str(refused.value)
+    assert "main already has the profile" in said and "proxy" not in said
+    assert work.roles() == ["main"] and not main.closed
+
+
+async def test_a_failed_start_on_a_locked_profile_names_the_lock_not_a_proxy(
+        work, monkeypatch, tmp_path):
+    """The engine's own words were a sandbox line and "the pipe is closed"; the
+    answer used to add "pass proxy=\"\"" to a launch that had no proxy."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "lock").symlink_to("127.0.1.1:+845767")
+    monkeypatch.setattr(work, "_factory", _NeverStarts)
+
+    with pytest.raises(RuntimeError) as told:
+        await server.browser_open(browser="support", profile=str(profile))
+    said = str(told.value)
+    assert "is locked (127.0.1.1:+845767)" in said
+    assert "proxy" not in said.split("\n", 1)[1]
+
+
+async def test_a_failed_start_without_a_proxy_does_not_blame_one(work, monkeypatch):
+    monkeypatch.setattr(work, "_factory", _NeverStarts)
+    with pytest.raises(RuntimeError) as told:
+        await server.browser_open(seed=4242)
+    assert 'proxy=""' not in str(told.value)
+    assert "proxy" not in str(told.value).split("\n", 1)[1]
+
+
 # --- looking -------------------------------------------------------------------------
 
 async def test_the_listing_says_what_is_open_and_the_sentence_when_nothing_is(work):

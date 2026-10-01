@@ -246,7 +246,8 @@ def launched_here(env: Optional[Mapping[str, str]] = None) -> dict:
 
 def plan_session(seed: Optional[int] = None, proxy: Optional[str] = None,
                  profile: Optional[str] = None,
-                 env: Optional[Mapping[str, str]] = None) -> SessionPlan:
+                 env: Optional[Mapping[str, str]] = None,
+                 helper: bool = False) -> SessionPlan:
     """Decide everything about one session, once.
 
     Every argument is three-valued: `None` means the caller said nothing and the
@@ -259,6 +260,18 @@ def plan_session(seed: Optional[int] = None, proxy: Optional[str] = None,
     on would hand the caller a different person than the one they asked for.
     """
     env = os.environ if env is None else env
+    if helper:
+        # ⛔ THE ENVIRONMENT'S PROFILE AND SEED DESCRIBE `main`, NOT THE HELPER.
+        # A deployment sets STEALTHFOX_PROFILE_DIR so the identity keeps its
+        # logins; read for `support` as well, it handed the helper main's own
+        # profile directory. Firefox locks a profile to one process, so with
+        # `main` open the helper could not start at all, and the engine said so
+        # as "the pipe is closed" over a sandbox line nobody could act on
+        # (measured 2026-10-01). The seed is the same mistake: the helper is a
+        # different person, so an environment seed would make it main's twin.
+        # The exit is still the environment's, as it is main's.
+        env = {k: v for k, v in env.items()
+               if k not in ("STEALTHFOX_PROFILE_DIR", "STEALTHFOX_SEED")}
 
     directory = _resolve_profile(profile, env)
     chosen_proxy = _resolve_proxy(proxy, env)
