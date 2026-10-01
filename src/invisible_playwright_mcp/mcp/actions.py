@@ -18,7 +18,9 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import stat
+import tempfile
 import time
 from typing import Any
 
@@ -982,8 +984,10 @@ def uploadable(paths, env=None) -> list[str]:
     Each must be absolute, a regular file once symlinks are followed, readable,
     under UPLOAD_MAX_BYTES, inside one of the named directories, and below it
     through no hidden component (`.ssh`, `.env`, `.git`): those hold keys more
-    often than documents. The resolved path is what is handed on, so a link
-    swapped after this check still cannot point the upload somewhere else.
+    often than documents.
+
+    This is the early answer, before any page is touched. What is uploaded is
+    decided again by `snapshot_files`, on the open file rather than on its name.
     """
     if isinstance(paths, str) or not isinstance(paths, (list, tuple)) or not paths:
         raise ValueError("paths is a list of one or more absolute file paths")
@@ -1004,10 +1008,7 @@ def uploadable(paths, env=None) -> list[str]:
             raise PermissionError(
                 f"{path} is not inside a directory uploads may come from "
                 f"({os.pathsep.join(dirs)})")
-        rel = os.path.relpath(real, home)
-        hidden = [c for c in rel.split(os.sep) if c.startswith(".")] if rel != "." else []
-        if hidden:
-            raise PermissionError(f"{path} lies under a hidden name ({hidden[0]}); not sent")
+        _no_hidden(path, real, home)
         try:
             st = os.stat(real)
         except OSError as exc:
@@ -1025,13 +1026,116 @@ def uploadable(paths, env=None) -> list[str]:
     return out
 
 
+def _home(real: str, dirs: list[str]):
+    return next((d for d in dirs if os.path.commonpath([real, d]) == d), None)
+
+
+def _no_hidden(path: str, real: str, home: str) -> None:
+    rel = os.path.relpath(real, home)
+    hidden = [c for c in rel.split(os.sep) if c.startswith(".")] if rel != "." else []
+    if hidden:
+        raise PermissionError(f"{path} lies under a hidden name ({hidden[0]}); not sent")
+
+
+def _opened_path(fd: int, real: str, st) -> str:
+    """Where the OPEN file actually is. On Linux the kernel says so; elsewhere
+    the name must still lead to the very file that was opened."""
+    proc = f"/proc/self/fd/{fd}"
+    if os.path.islink(proc):
+        return os.readlink(proc)
+    now = os.stat(real)
+    if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+        raise PermissionError(f"{real} changed while it was being read; not sent")
+    return real
+
+
+#: How long a snapshot outlives its call. Firefox reads a picked file's bytes
+#: when the page sends it, not when it is picked, so the copy has to be there
+#: for the submit that follows; an hour is longer than any form takes.
+SNAPSHOT_KEEP_S = 3600
+
+
+def snapshot_files(files: list[str], env=None) -> list[str]:
+    """Private copies of `files`, checked on the open file, not on its name.
+
+    ⛔ THE NAME IS NOT THE FILE. `uploadable` resolves and stats a path, and a
+    chooser is answered seconds later; in a directory other processes write to
+    (a staging directory several sessions share), the name can be pointed at
+    something else in between, and the engine would read whatever it names by
+    then. So each file is opened without following a final link, the OPEN file
+    is checked - regular, within the limit, really inside an allowed directory
+    and under no hidden name - and its bytes are copied into a fresh owner-only
+    directory. That copy is what the engine is given, and nothing else can
+    write to it.
+    """
+    dirs = upload_dirs(env)
+    _expire_snapshots()
+    root = tempfile.mkdtemp(prefix=_SNAPSHOT_PREFIX)
+    try:
+        out = []
+        for i, real in enumerate(files):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+            try:
+                fd = os.open(real, flags)
+            except OSError as exc:
+                raise PermissionError(f"{real} could not be opened as a plain file "
+                                      f"({exc.strerror or exc}); not sent") from None
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise ValueError(f"{real} is not a regular file")
+                actual = os.path.realpath(_opened_path(fd, real, st))
+                home = _home(actual, dirs)
+                if home is None:
+                    raise PermissionError(
+                        f"{real} is no longer inside a directory uploads may come from; not sent")
+                _no_hidden(real, actual, home)
+                os.makedirs(os.path.join(root, str(i)), mode=0o700)
+                dest = os.path.join(root, str(i), os.path.basename(actual))
+                total = 0
+                with os.fdopen(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                       | getattr(os, "O_BINARY", 0), 0o600), "wb") as copy:
+                    while chunk := os.read(fd, 1 << 20):
+                        total += len(chunk)
+                        if total > UPLOAD_MAX_BYTES:
+                            raise ValueError(f"{real} is over the {UPLOAD_MAX_BYTES}-byte "
+                                             "limit for one file")
+                        copy.write(chunk)
+                out.append(dest)
+            finally:
+                os.close(fd)
+        return out
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
+_SNAPSHOT_PREFIX = "invisible-upload-"
+
+
+def _expire_snapshots() -> None:
+    """Snapshots older than SNAPSHOT_KEEP_S, from this or an earlier process."""
+    base = tempfile.gettempdir()
+    with swallow("a snapshot directory that cannot be listed is left alone"):
+        for name in os.listdir(base):
+            path = os.path.join(base, name)
+            if not name.startswith(_SNAPSHOT_PREFIX) or os.path.islink(path):
+                continue
+            with swallow("another process may expire it first"):
+                if time.time() - os.stat(path).st_mtime > SNAPSHOT_KEEP_S:
+                    shutil.rmtree(path)
+
+
 async def upload_files(session, selector: str, paths) -> str:
     """Attach local files to a file input, through its file chooser."""
-    files = uploadable(paths)
+    named = uploadable(paths)
     page = session.page()
     target = await _on_selector(session, selector, "upload",
                                 lambda: page.eval_on_selector(selector, _FILE_INPUT_JS))
-    names = ", ".join(os.path.basename(f) for f in files)
+    names = ", ".join(os.path.basename(f) for f in named)
+    if len(named) > 1 and target["file"] and not target["multiple"]:
+        raise RuntimeError(f"{selector} takes one file; upload them one at a time")
+    files = snapshot_files(named)
 
     if target["file"] and not target["shown"]:
         if len(files) > 1 and not target["multiple"]:
