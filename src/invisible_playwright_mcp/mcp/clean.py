@@ -26,6 +26,7 @@ measured -7% on the snapshot at exactly zero element loss.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Dict, Optional
 
@@ -152,9 +153,49 @@ SNAPSHOT_CSS = ",".join(
     + ["[onclick]", "[tabindex]:not([tabindex='-1'])", "[contenteditable='true']"]
 )
 
-#: What a filled password box shows instead of its value, here and in the
-#: snapshot (actions.SNAPSHOT_JS), so the two read the same.
+#: What a filled secret field shows instead of its value, here and in the
+#: snapshot (actions.SNAPSHOT_JS), so the two read the same. Eight whatever the
+#: length, so the mask does not say how long the secret is either.
 MASKED_PASSWORD = "\u2022" * 8
+
+#: The autocomplete tokens that name a secret, from the HTML autofill field
+#: names: a password being entered or chosen, a code sent to the person, and a
+#: card's security code. A field carrying one is masked whatever its `type`.
+#:
+#: \u26d4 THIS IS ALSO HOW A SHOWN PASSWORD STAYS MASKED, AS FAR AS IT CAN. A "show
+#: password" button turns `type=password` into `type=text`, and from then on
+#: the type says nothing. The token is the part that survives the toggle on a
+#: form written for password managers, which is most login forms. A field that
+#: was switched to text and carries no token cannot be told apart from any
+#: other text box by anything the page exposes: Gecko remembers it
+#: (`hasBeenTypePassword`) but only to privileged code, and keeping a record of
+#: our own in the page would be a write a detector can read. That residue is a
+#: known limit, not a guess this predicate makes.
+SECRET_AUTOCOMPLETE = ("current-password", "new-password", "one-time-code", "cc-csc")
+
+
+def is_secret_field(tag: str, attrs: dict) -> bool:
+    """Whether an element's value must not be shown: the markup's half of the
+    rule `SECRET_FIELD_JS` applies to the live page."""
+    if (tag or "").lower() != "input":
+        return False
+    if (attrs.get("type") or "").lower() == "password":
+        return True
+    tokens = (attrs.get("autocomplete") or "").lower().split()
+    return any(t in SECRET_AUTOCOMPLETE for t in tokens)
+
+
+#: The same rule for the live page, built from the same tuple. Joined into the
+#: scripts by concatenation, for the reason given above SNAPSHOT_CSS.
+SECRET_FIELD_JS = """
+    function secretField(el) {
+        if (!el || el.tagName !== 'INPUT') return false;
+        if (String(el.type || '').toLowerCase() === 'password') return true;
+        const tokens = String(el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+        const SECRET = """ + json.dumps(list(SECRET_AUTOCOMPLETE)) + """;
+        return tokens.some(t => SECRET.indexOf(t) >= 0);
+    }
+"""
 
 # Attributes worth their bytes. Everything else goes: `class` alone routinely
 # runs to a few hundred characters of framework utilities per element.
@@ -361,12 +402,11 @@ def _slim_attributes(tree: LexborHTMLParser) -> None:
         if cls:
             hits = [t for t in cls.split() if STATE_CLASS.search(t)]
             state = " ".join(hits[:3])
-        # A password box keeps its `value` attribute only as a sign that it
+        # A secret field keeps its `value` attribute only as a sign that it
         # is filled: the markup goes back to the model, and a page that ships
         # a prefilled password, or mirrors a typed one into the attribute,
         # would otherwise put the password in the conversation.
-        if (node.tag == "input" and (attrs.get("type") or "").lower() == "password"
-                and attrs.get("value")):
+        if is_secret_field(node.tag, attrs) and attrs.get("value"):
             node.attrs["value"] = MASKED_PASSWORD
             attrs = _attrs(node)
         for name, value in list(attrs.items()):

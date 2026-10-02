@@ -77,6 +77,15 @@ reads to the region you need rather than taking the whole page, and open any
 image before it leaves your machine, which is the standing rule in
 [dated screenshots of a page as evidence](dated-screenshots-as-evidence.md).
 
+**What the reads do with a field you filled.** `browser_snapshot` and
+`browser_read_html` never return the value of a password box, or of a field
+whose `autocomplete` names a secret (`current-password`, `new-password`,
+`one-time-code`, `cc-csc`): they show eight dots, which says the field is filled
+and nothing about what with. That still covers a password a "show" button has
+turned into plain text, as long as the field carries the token. A field switched
+to text with no token reads like any other text box, and its value comes back. A
+screenshot paints whatever the page paints.
+
 ## What not to bother with
 
 **Obfuscating the secret in the prompt.** Base64 or a substitution does not help:
