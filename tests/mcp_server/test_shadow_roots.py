@@ -175,15 +175,13 @@ def test_every_shadow_selector_the_snapshot_gives_can_be_used(run):
 
 
 @pytest.mark.e2e
-@pytest.mark.xfail(strict=True, reason=(
-    "engine: on firefox-34, the engine the packaged seal pins, juggler's "
-    "Page.dispatchTrustedInputEvents answers NS_ERROR_UNEXPECTED for a node "
-    "inside a shadow tree (dispatchDOMEventViaPresShellForTesting needs an "
-    "uncomposed document). The patched juggler replaces that command with "
-    "Page.selectOptions, which sets this select; nothing in this package can. "
-    "Strict, so it turns red the day the seal moves to that engine, and the "
-    "mark must go then."))
 def test_a_select_inside_a_shadow_root_can_be_set(run):
+    """Up to firefox-34 this could not be done: the driver set the option
+    from the page and asked the engine for trusted `input`/`change`
+    (`Page.dispatchTrustedInputEvents`), which answered NS_ERROR_UNEXPECTED
+    for any node inside a shadow tree. firefox-35 selects through the
+    dropdown's own path (`Page.selectOptions`), which a shadow root does not
+    stop; the test was a strict xfail until the engine moved."""
     async def body(s):
         await actions.select_option(s, "#state >> #select", "Texas")
         return await s.page().locator("#state >> #select").input_value()

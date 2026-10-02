@@ -134,7 +134,7 @@ clicking, not less.
 ## Sources
 
 - Measured 2026-09-17 through this project's MCP server over stdio, on a page carrying one open and one closed shadow root, each containing a paragraph and a button, served from `127.0.0.1`. `browser_click` returned `clicked #ob` and `clicked #cb`; a light-DOM log element read back `open clicked` and then `closed clicked`. `browser_evaluate` on the open host's `shadowRoot.textContent` returned the component's text; on the closed host `shadowRoot` was `null`.
-- Measured 2026-10-02 on firefox-34, on a page whose fields live in open roots, one of them two components deep, beside a closed one: `browser_snapshot` listed `#firstName >> #input` and `#card >> #inner >> #input`, `browser_type` and `browser_click` worked through both, and nothing inside the closed root was listed. A `<select>` inside an open root is listed but cannot be set on that engine yet: its input command refuses a node in a shadow tree.
+- Measured 2026-10-02 on firefox-34, on a page whose fields live in open roots, one of them two components deep, beside a closed one: `browser_snapshot` listed `#firstName >> #input` and `#card >> #inner >> #input`, `browser_type` and `browser_click` worked through both, and nothing inside the closed root was listed. A `<select>` inside an open root was listed but could not be set on that engine: its input command refused a node in a shadow tree. From firefox-35 the engine selects through the dropdown's own path, and `browser_select_option` sets that `<select>`.
 - [Playwright's own documentation](https://playwright.dev/docs/locators) states that closed-mode shadow roots are not supported, which is the baseline the measurement above is interesting against.
 
 ---
