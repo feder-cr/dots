@@ -315,9 +315,12 @@ def test_the_chooser_pause_is_the_wrappers_public_one():
     """The hesitation is drawn by the wrapper's public function, not rebuilt
     here from its private names. Known-bad: `invisible_playwright._behaviour`
     imported by this server, with the spread of a hesitation copied in."""
+    import inspect
+
     import invisible_playwright
 
     assert actions.hesitation is invisible_playwright.hesitation
+    assert "_behaviour" not in inspect.getsource(actions)
 
 
 def test_the_copies_belong_to_the_browser_and_go_when_it_closes(env, tmp_path):

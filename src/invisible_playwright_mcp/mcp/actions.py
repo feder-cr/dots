@@ -21,7 +21,6 @@ import re
 import shutil
 import stat
 import tempfile
-import time
 from typing import Any
 
 from invisible_playwright import hesitation
@@ -730,70 +729,11 @@ FIELD_STATE_JS = """(el) => {""" + clean.SECRET_FIELD_JS + """
 
 
 async def _field_state(page, selector: str) -> dict:
-    return await page.locator(selector).first.evaluate(FIELD_STATE_JS)
-
-
-def _hesitation(session, tag: str, times: int = 1) -> float:
-    """How long this session's hand stops before an act, in seconds: `times`
-    of its hesitations, each drawn on its own stream for `tag`. 0 when the
-    session has no rhythm at all.
-
-    Drawn from the session's own typing persona, the same seeded hand the
-    engine types with - "how long the typist stops to think" - so it varies
-    per act and per session and is no constant every install shares. `None`
-    for a seed means humanising is off, and that keeps meaning no rhythm, not
-    a default one.
-    """
-    seed = session.seed
-    if seed is None:
-        return 0.0
-    # ⛔ THE PERSONA IS THE WRAPPER'S, AND SO IS ITS SPREAD. 0.55 is the sigma
-    # its `plan_typing` gives every hesitation; it is not exposed as a field,
-    # so it is written here once more until the wrapper owns these pauses too.
-    from invisible_playwright._behaviour import TypingPersona, _log_normal, _rng
-
-    median = TypingPersona.from_seed(seed).hesitation_median_ms
-    return sum(_log_normal(_rng(seed, tag, session.next_pause_nonce()), median, 0.55)
-               for _ in range(times)) / 1000.0
-
-
-def _pause_before_typing(session) -> float:
-    """How long this session's typist stops between reaching a field and the
-    first key.
-
-    ⛔ A PERSON DOES NOT TYPE THE INSTANT A FIELD HAS THE FOCUS, AND THE PAGE
-    COUNTS ON IT. The engine's `fill` focuses and presses the first key in the
-    same breath, a few milliseconds apart, which no hand does - and a page that
-    answers the focus a moment later (a store writing its stored answer back,
-    a formatter, a field that loads its suggestions) then writes over what is
-    already arriving. Measured on a real form: "30" gone a second after it was
-    typed, an email keeping only its last letters.
-    """
-    return _hesitation(session, "mcp:before-typing")
-
-
-async def _settle_after_focus(session, selector: str, held: str) -> None:
-    """Wait the typist's pause, and longer while the field visibly changes.
-
-    The pause starts again from every change the field shows, so a page that
-    is still answering the focus finishes before the first key. Read through
-    `input_value`, which the page cannot observe, and bounded by the action
-    timeout, because a field that never stops changing must not hold the call
-    forever. What the page does not SHOW - a timer about to fire - cannot be
-    waited for by anybody; what that costs is said after typing, not guessed.
-    """
-    pause = _pause_before_typing(session)
-    if pause <= 0:
-        return
-    page = session.page()
-    clock = time.monotonic
-    started = still_since = clock()
-    while clock() - still_since < pause and clock() - started < ACTION_TIMEOUT_MS / 1000:
-        await asyncio.sleep(pause / 8)
-        with swallow("a field that cannot be read is waited for, not watched"):
-            now = await page.locator(selector).first.input_value(timeout=ACTION_TIMEOUT_MS)
-            if now != held:
-                held, still_since = now, clock()
+    """The field's state, waiting for it as long as an action waits: the first
+    read is what finds the field, so a selector that matches nothing gets the
+    action timeout and not the engine's longer default."""
+    return await page.locator(selector).first.evaluate(FIELD_STATE_JS,
+                                                       timeout=ACTION_TIMEOUT_MS)
 
 
 def _shown(value: str, secret: bool) -> str:
@@ -851,9 +791,17 @@ def what_the_field_kept(selector: str, text: str, before: dict, after: dict) -> 
 async def type_text(session, selector: str, text: str) -> str:
     """Type into a field the way a person does, and say what the field kept.
 
-    Focus, the typist's pause (longer while the page is still answering the
-    focus), then every character through the keyboard at the session's rhythm,
-    replacing what the field held, and a read of the field afterwards.
+    The engine's `fill`: focus, the typist's pause (longer while the page is
+    still answering the focus), then every character through the keyboard at
+    the session's rhythm, replacing what the field held; and a read of the
+    field afterwards.
+
+    ⛔ THE PAUSE IS THE ENGINE'S, NOT THIS SERVER'S. It stood here, between a
+    `page.focus` and the `fill`, drawn by importing private names of the
+    wrapper and copying the spread of its hesitations, because the engine's
+    `fill` pressed the first key in the same breath as the focus. The engine
+    now waits by itself, for every caller, so a second pause here would be
+    one hesitation too many.
 
     ⛔ EVERY CHARACTER IS A KEY, HOWEVER LONG THE TEXT. Text past eighty
     characters used to go in through `insert_text`, described as a paste, and
@@ -867,10 +815,8 @@ async def type_text(session, selector: str, text: str) -> str:
     (`Work.typing`), so typing it still finishes.
     """
     page = session.page()
-    await _on_selector(session, selector, "typing",
-                       lambda: page.focus(selector, timeout=ACTION_TIMEOUT_MS))
-    before = await _field_state(page, selector)
-    await _settle_after_focus(session, selector, before.get("value"))
+    before = await _on_selector(session, selector, "typing",
+                                lambda: _field_state(page, selector))
     await _on_selector(session, selector, "typing",
                        lambda: page.fill(selector, text, timeout=ACTION_TIMEOUT_MS))
     return what_the_field_kept(selector, text, before, await _field_state(page, selector))

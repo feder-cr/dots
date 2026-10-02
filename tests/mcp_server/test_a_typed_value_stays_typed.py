@@ -14,9 +14,12 @@ retry made a second chip. It also called a one-time code spread over six boxes
 an error, because the first box keeps one digit by design. So nothing is
 retyped; each shape is named for what it is.
 
-The unit tests hold the sentences and the pause; the e2e ones hold six real
-shapes - an ordinary field, a field that keeps digits only, a maxlength, a code
-split across boxes, a chip field and a store field - against a real engine.
+The pause before the first key is the engine's own `fill` since
+invisible-playwright 0.25.8, for every caller; this server used to add it in
+front of `fill` and adds nothing now. The unit tests hold the sentences and
+that the server adds no pause of its own; the e2e ones hold six real shapes -
+an ordinary field, a field that keeps digits only, a maxlength, a code split
+across boxes, a chip field and a store field - against a real engine.
 """
 from __future__ import annotations
 
@@ -86,30 +89,40 @@ def test_a_target_with_no_readable_text_says_it_cannot_be_read_back():
 
 # --- the pause --------------------------------------------------------------
 
-class _Seeded:
-    def __init__(self, seed):
-        self.seed = seed
-        self._n = 0
+def test_the_server_adds_no_pause_of_its_own_in_front_of_fill(monkeypatch):
+    """The engine's `fill` waits the typist's pause between the focus and the
+    first key; a second one here would be a hesitation too many. Known-bad, the
+    version before: a `focus`, a pause drawn from private names of the wrapper,
+    then `fill`."""
+    calls = []
 
-    def next_pause_nonce(self):
-        self._n += 1
-        return self._n
+    class _First:
+        async def evaluate(self, js, timeout=None):
+            calls.append("read")
+            return {"value": "", "focused": False, "secret": False}
 
+    class _Page:
+        def locator(self, selector):
+            return type("L", (), {"first": _First()})()
 
-def test_the_pause_is_the_sessions_own_and_varies_per_field():
-    """Seeded, so one session is one hand; drawn per field, so a page timing
-    focus to first key does not see one number every time."""
-    one, again = _Seeded(4242), _Seeded(4242)
-    first = [actions._pause_before_typing(one) for _ in range(5)]
-    assert first == [actions._pause_before_typing(again) for _ in range(5)]
-    assert len(set(first)) == 5
-    other = [actions._pause_before_typing(_Seeded(7)) for _ in range(5)]
-    assert other != first
-    assert all(0.05 < p < 10 for p in first + other), first + other
+        async def focus(self, *a, **kw):
+            calls.append("focus")
 
+        async def fill(self, selector, text, timeout=None):
+            calls.append("fill")
 
-def test_no_rhythm_means_no_pause():
-    assert actions._pause_before_typing(_Seeded(None)) == 0.0
+    class _Session:
+        seed = 4242
+
+        def page(self):
+            return _Page()
+
+    async def slept(s):
+        calls.append("sleep")
+
+    monkeypatch.setattr(actions.asyncio, "sleep", slept)
+    asyncio.run(actions.type_text(_Session(), "#f", "30"))
+    assert calls == ["read", "fill", "read"], calls
 
 
 # --- against a real engine -------------------------------------------------
@@ -169,9 +182,13 @@ def url():
 
 def _seed_whose_first_pause(longer_than=None, shorter_than=None):
     """A seed whose first pause is known, so the store tests assert the
-    mechanism instead of depending on a draw."""
+    mechanism instead of depending on a draw. The engine draws it: the first
+    field typed into on a page is its act "field", nonce 1, which its public
+    `hesitation` documents."""
+    from invisible_playwright import hesitation
+
     for seed in range(1, 5000):
-        p = actions._pause_before_typing(_Seeded(seed))
+        p = hesitation(seed, "field", nonce=1)
         if (longer_than is None or p > longer_than) and (shorter_than is None or p < shorter_than):
             return seed, p
     raise AssertionError("no seed found")
