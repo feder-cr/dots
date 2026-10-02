@@ -158,6 +158,7 @@ SNAPSHOT_JS = """() => {
     // the page, which is a detection surface in a product that exists not to
     // have one. If a stable index is ever wanted, it gets decided in the open.
     const SEL = """ + json.dumps(clean.SNAPSHOT_CSS) + """;
+""" + clean.LABELLED_CONTROL_JS + """
 
     // offsetParent used to stand in for "visible" and was wrong both ways: it is
     // null on every position:fixed element - the cookie banner, the sticky bar,
@@ -191,7 +192,9 @@ SNAPSHOT_JS = """() => {
         if (r.width <= 0 || r.height <= 0) return false;
         const s = getComputedStyle(el);
         if (s.visibility === 'hidden' || s.display === 'none') return false;
-        if (parseFloat(s.opacity) === 0) return false;
+        // Transparent is hidden, unless it is a control a shown label names:
+        // see clean.LABELLED_CONTROL_JS.
+        if (parseFloat(s.opacity) === 0 && !labelledControl(el)) return false;
         if (el.disabled === true) return false;
         // Parked off-canvas to the left or above: the ordinary way to hide
         // something without hiding it. Below the fold is NOT excluded, because

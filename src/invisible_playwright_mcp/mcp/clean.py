@@ -534,7 +534,48 @@ def _to_text(tree: LexborHTMLParser) -> str:
 
 # --- the live page ---------------------------------------------------------
 
-VISIBLE_HTML_JS = """() => {
+#: A form control the page draws at opacity 0 while a visible label stands in
+#: for it. Vuetify does this to every labelled text field that is not focused:
+#: the <input> is laid out full size, enabled and typable, at opacity 0, and
+#: the floating <label for=...> is what a person reads. Measured on Vuetify
+#: 3.7.5: a page with one such field gave the snapshot an empty
+#: interactive_elements list, while typing into the same input filled it.
+#:
+#: The label is the evidence, and it has to be SHOWN: a honeypot field is also
+#: transparent, and its label, if it has one, is hidden with it. So this keeps
+#: only an input, select or textarea that has a label with a box, on screen,
+#: with text, that the browser is painting. Nothing else at opacity 0 is kept.
+#:
+#: Shared by the snapshot (actions.SNAPSHOT_JS) and VISIBLE_HTML_JS below,
+#: joined in by concatenation for the reason given above SNAPSHOT_CSS.
+LABELLED_CONTROL_JS = """
+    function labelledControl(el) {
+        if (!/^(input|select|textarea)$/.test(el.tagName.toLowerCase())) return false;
+        let labels = null;
+        try { labels = el.labels; } catch (err) { return false; }
+        if (!labels) return false;
+        for (const l of labels) {
+            try {
+                // checkVisibility also sees an ancestor at opacity 0 or
+                // display:none, which the label's own computed style does not.
+                if (typeof l.checkVisibility === 'function'
+                    && !l.checkVisibility({opacityProperty: true, visibilityProperty: true})) continue;
+                const s = getComputedStyle(l);
+                if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) continue;
+                // A label is usually inline, so its painted area is its line
+                // boxes: one of them has to be on screen.
+                const boxes = [...l.getClientRects()];
+                if (!boxes.some(b => b.width > 0 && b.height > 0 && b.right > 0 && b.bottom > 0)) continue;
+                if (!(l.innerText || '').trim()) continue;
+                return true;
+            } catch (err) { continue; }
+        }
+        return false;
+    }
+"""
+
+
+VISIBLE_HTML_JS = """() => {""" + LABELLED_CONTROL_JS + """
     // The HTML of the page with everything the browser is not painting removed.
     //
     // The whole point is the CLONE. Visibility is a computed property - it comes
@@ -566,7 +607,8 @@ VISIBLE_HTML_JS = """() => {
         let s = null, r = null;
         try { s = getComputedStyle(el); r = el.getBoundingClientRect(); } catch (err) { continue; }
         if (!s || !r || typeof r.width !== 'number') continue;
-        if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) {
+        if (s.display === 'none' || s.visibility === 'hidden'
+            || (parseFloat(s.opacity) === 0 && !labelledControl(el))) {
             doomed.push(copy[i]);
             continue;
         }

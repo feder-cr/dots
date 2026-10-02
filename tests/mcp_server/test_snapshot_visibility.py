@@ -21,6 +21,8 @@ test_real_launch.py.
 """
 import re
 
+import pytest
+
 from invisible_playwright_mcp.mcp import actions
 
 
@@ -110,3 +112,166 @@ def test_the_snapshot_does_not_deduplicate():
     js = _code(actions.SNAPSHOT_JS)
     for tell in ("doppioni", "firma", "dedup", "signature"):
         assert tell not in js, f"a deduplication is back: {tell}"
+
+
+# --- a transparent control with a shown label -------------------------------
+#
+# Measured 2026-10-01 on Vuetify 3.7.5: a labelled, unfocused v-text-field keeps
+# its <input> at opacity 0, full size and enabled, and paints the floating
+# <label for=...> instead. The snapshot dropped every opacity-0 element, so a
+# page with one such field reported `interactive_elements: []`, while typing
+# into the same input filled it. The page below reproduces that markup without
+# Vuetify, so it runs offline.
+
+LABELLED_PAGE = b"""<!doctype html>
+<html><head><title>labelled</title>
+<style>
+  .field { position: relative; width: 400px; height: 56px; margin: 8px }
+  .field label { position: absolute; left: 12px; top: 16px }
+  .field input { position: absolute; inset: 0; width: 100%; opacity: 0 }
+  .ghost, .field label.ghost { opacity: 0 }
+  .ghost-wrap { opacity: 0 }
+  .field label.away { left: -9999px }
+</style>
+</head><body>
+  <div class="field">
+    <label for="code">Code</label>
+    <input id="code" name="code" type="text">
+  </div>
+  <div class="field">
+    <label>Wrapped <input id="wrapped" name="wrapped" type="text"></label>
+  </div>
+
+  <input id="honeypot-bare" name="honeypot-bare" class="ghost" type="text">
+  <div class="field">
+    <label for="honeypot-faded" class="ghost">Leave empty</label>
+    <input id="honeypot-faded" name="honeypot-faded" type="text">
+  </div>
+  <div class="field">
+    <span class="ghost-wrap"><label for="honeypot-wrapped">Leave empty</label></span>
+    <input id="honeypot-wrapped" name="honeypot-wrapped" type="text">
+  </div>
+  <div class="field">
+    <label for="honeypot-away" class="away">Leave empty</label>
+    <input id="honeypot-away" name="honeypot-away" type="text">
+  </div>
+  <div class="field">
+    <label for="honeypot-blank"></label>
+    <input id="honeypot-blank" name="honeypot-blank" type="text">
+  </div>
+
+  <div id="ghost-button" class="ghost" role="button" tabindex="0"
+       style="width:100px;height:30px">GHOST</div>
+</body></html>"""
+
+#: Shown labels name these, so a person can see what they are.
+LABELLED = ("code", "wrapped")
+#: Transparent with no label a person can see: stays out.
+UNLABELLED = ("honeypot-bare", "honeypot-faded", "honeypot-wrapped",
+              "honeypot-away", "honeypot-blank", "ghost-button")
+
+
+def test_the_opacity_rule_has_one_exception_and_it_is_shared():
+    """The snapshot and the visible-HTML clone answer the same question about
+    the same element, so they carry one copy of the exception, not two."""
+    from invisible_playwright_mcp.mcp import clean
+
+    assert clean.LABELLED_CONTROL_JS in actions.SNAPSHOT_JS
+    assert clean.LABELLED_CONTROL_JS in clean.VISIBLE_HTML_JS
+    for js in (_code(actions.SNAPSHOT_JS), _code(clean.VISIBLE_HTML_JS)):
+        assert "parseFloat(s.opacity) === 0 && !labelledControl(el)" in js
+
+
+def test_the_exception_is_only_for_form_fields():
+    """Buttons and links have their own text; a transparent one is hidden."""
+    from invisible_playwright_mcp.mcp import clean
+
+    assert "^(input|select|textarea)$" in _code(clean.LABELLED_CONTROL_JS)
+
+
+def _serve(page):
+    import http.server
+    import socket
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
+        def log_message(self, *a):
+            pass
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, "http://127.0.0.1:%d/" % port
+
+
+@pytest.fixture(scope="module")
+def labelled_page():
+    """One browser, the snapshot and the form-mode HTML of the same page."""
+    import asyncio
+    import json
+
+    from invisible_playwright_mcp.mcp.plan import plan_session
+    from invisible_playwright_mcp.mcp.session import StealthSession
+
+    srv, url = _serve(LABELLED_PAGE)
+
+    async def run():
+        # Through plan_session, the way production builds a session; see
+        # test_read_html_in_a_browser.py for why a bare one fails on a runner.
+        session = StealthSession(**plan_session().kwargs)
+        try:
+            await session.start()
+            await actions.navigate(session, url)
+            snap = json.loads(await actions.snapshot(session))
+            html = await actions.read_html(session, "form")
+            return snap, html
+        finally:
+            await session.close()
+
+    try:
+        yield asyncio.run(run())
+    finally:
+        srv.shutdown()
+
+
+def _ids(snap):
+    return {e.get("id") for e in snap["interactive_elements"]}
+
+
+@pytest.mark.e2e
+def test_a_transparent_field_with_a_shown_label_is_in_the_snapshot(labelled_page):
+    snap, _ = labelled_page
+    ids = _ids(snap)
+    for want in LABELLED:
+        assert want in ids, (
+            "%s is drawn at opacity 0 behind a visible label and is typable, "
+            "but the snapshot left it out: %r" % (want, sorted(i for i in ids if i)))
+
+
+@pytest.mark.e2e
+def test_a_transparent_field_with_no_shown_label_stays_out(labelled_page):
+    """The other half, so the test above cannot pass by dropping the opacity
+    rule altogether."""
+    snap, _ = labelled_page
+    ids = _ids(snap)
+    for unwanted in UNLABELLED:
+        assert unwanted not in ids, "%s has no label a person can see" % unwanted
+
+
+@pytest.mark.e2e
+def test_read_html_keeps_the_same_fields_and_drops_the_same_honeypots(labelled_page):
+    _, html = labelled_page
+    for want in LABELLED:
+        assert 'id="%s"' % want in html, "read_html dropped %s" % want
+    for unwanted in UNLABELLED:
+        assert 'id="%s"' % unwanted not in html, "read_html kept %s" % unwanted
