@@ -39,7 +39,7 @@ from typing import Awaitable, Callable, Optional
 
 from invisible_playwright.async_api import TargetClosedError
 
-from . import DEFAULT_BROWSER_ID, GONE, NOT_OPEN, SUPPORT_BROWSER_ID, identity, plan, store
+from . import DEFAULT_BROWSER_ID, GONE, NOT_OPEN, SUPPORT_BROWSER_ID, identity, plan, process, store
 from ..quiet import swallow
 from .actions import NAVIGATION_TIMEOUT_MS
 from .session import StealthSession
@@ -157,7 +157,7 @@ def profile_holder(directory) -> Optional[str]:
         # Its process cannot be asked from here, so it is taken at its word,
         # which is what Firefox does with it too.
         return "a Firefox on %s" % host
-    if not _alive(int(pid)):
+    if not process.alive(int(pid)):
         return None
     return "another Firefox (process %s)" % pid
 
@@ -171,18 +171,6 @@ def _this_machine(address: str) -> bool:
     with swallow("a host with no resolvable name is not this machine's address"):
         return address == socket.gethostbyname(socket.gethostname())
     return False
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def _why_it_did_not_start(settings: dict) -> str:

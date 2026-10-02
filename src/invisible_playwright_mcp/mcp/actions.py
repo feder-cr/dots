@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any
 
-from . import clean
+from . import clean, process
 from ..quiet import swallow
 
 # The character cap every text-returning action shares. Callers can lower it;
@@ -731,9 +731,33 @@ async def _field_state(page, selector: str) -> dict:
     return await page.locator(selector).first.evaluate(FIELD_STATE_JS)
 
 
+def _hesitation(session, tag: str, times: int = 1) -> float:
+    """How long this session's hand stops before an act, in seconds: `times`
+    of its hesitations, each drawn on its own stream for `tag`. 0 when the
+    session has no rhythm at all.
+
+    Drawn from the session's own typing persona, the same seeded hand the
+    engine types with - "how long the typist stops to think" - so it varies
+    per act and per session and is no constant every install shares. `None`
+    for a seed means humanising is off, and that keeps meaning no rhythm, not
+    a default one.
+    """
+    seed = session.seed
+    if seed is None:
+        return 0.0
+    # ⛔ THE PERSONA IS THE WRAPPER'S, AND SO IS ITS SPREAD. 0.55 is the sigma
+    # its `plan_typing` gives every hesitation; it is not exposed as a field,
+    # so it is written here once more until the wrapper owns these pauses too.
+    from invisible_playwright._behaviour import TypingPersona, _log_normal, _rng
+
+    median = TypingPersona.from_seed(seed).hesitation_median_ms
+    return sum(_log_normal(_rng(seed, tag, session.next_pause_nonce()), median, 0.55)
+               for _ in range(times)) / 1000.0
+
+
 def _pause_before_typing(session) -> float:
     """How long this session's typist stops between reaching a field and the
-    first key, in seconds, or 0 when the session has no typing rhythm at all.
+    first key.
 
     ⛔ A PERSON DOES NOT TYPE THE INSTANT A FIELD HAS THE FOCUS, AND THE PAGE
     COUNTS ON IT. The engine's `fill` focuses and presses the first key in the
@@ -742,24 +766,8 @@ def _pause_before_typing(session) -> float:
     a formatter, a field that loads its suggestions) then writes over what is
     already arriving. Measured on a real form: "30" gone a second after it was
     typed, an email keeping only its last letters.
-
-    Drawn from the session's own typing persona, the same seeded hand the
-    engine types with, as one of its hesitations - "how long the typist stops
-    to think" is what this pause is - so it varies per field and per session
-    and is no constant every install shares. `None` for a seed means
-    humanising is off, and that keeps meaning no rhythm, not a default one.
     """
-    seed = session.seed
-    if seed is None:
-        return 0.0
-    # ⛔ THE PERSONA IS THE WRAPPER'S, AND SO IS ITS SPREAD. 0.55 is the sigma
-    # its `plan_typing` gives every hesitation; it is not exposed as a field,
-    # so it is written here once more until the wrapper owns this pause too.
-    from invisible_playwright._behaviour import TypingPersona, _log_normal, _rng
-
-    persona = TypingPersona.from_seed(seed)
-    draw = _rng(seed, "mcp:before-typing", session.next_typing_nonce())
-    return _log_normal(draw, persona.hesitation_median_ms, 0.55) / 1000.0
+    return _hesitation(session, "mcp:before-typing")
 
 
 async def _settle_after_focus(session, selector: str, held: str) -> None:
@@ -934,9 +942,15 @@ async def select_option(session, selector: str, value: str) -> str:
 # The file chooser is what a person uses, so the chooser is what this answers:
 # the real pointer clicks what opens it and the files go in through the
 # engine's own file-input path, with the input and change events a picked file
-# produces. A hidden input - the usual shape, a styled button in front of an
-# `<input type=file>` nobody can see - is given the files directly, which is
-# what its chooser would have done; there is nothing visible to click on it.
+# produces, after the time a person takes to pick them.
+#
+# ⛔ AND A HIDDEN INPUT IS OPENED THROUGH WHAT A PERSON CLICKS, NEVER FED. The
+# usual shape is a styled button or label in front of an `<input type=file>`
+# nobody can see, and the first version gave such an input the files directly:
+# the page then heard `input` and `change` on a control no pointer had touched,
+# with no click anywhere before it, which no person can produce. So the label
+# that opens it is clicked instead, and when there is none the caller is told
+# to name the button that does.
 #
 # ⛔ AND IT READS ONLY FROM DIRECTORIES SOMEBODY NAMED. This hands a local file
 # to a remote page, and the model choosing the path is driven by pages it has
@@ -953,9 +967,6 @@ UPLOAD_MAX_FILES = 20
 #: the one shared browser process and kept for an hour, so twenty files at the
 #: per-file limit would be a gigabyte copied and held for one call.
 UPLOAD_MAX_TOTAL_BYTES = 100 * 1024 * 1024
-#: How long the click has to open a chooser before the selector is reported as
-#: not the thing that opens one.
-CHOOSER_MS = 10_000
 
 _FILE_INPUT_JS = """el => ({
   file: el.tagName === "INPUT" && (el.type || "").toLowerCase() === "file",
@@ -987,7 +998,9 @@ def upload_dirs(env=None) -> list[str]:
                 f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not an absolute path")
         named = os.path.normpath(entry)
         real = os.path.realpath(named)
-        if real != named or not os.path.isdir(real):
+        # Compared as this system compares paths: `c:/tmp` and `C:/tmp` are
+        # one directory on Windows, and only a link makes them two.
+        if os.path.normcase(real) != os.path.normcase(named) or not os.path.isdir(real):
             raise RuntimeError(
                 f"{UPLOAD_DIRS_ENV} names {entry!r}, which is not a directory at "
                 f"that exact path (it resolves to {real!r}); uploads are off")
@@ -1019,8 +1032,10 @@ def uploadable(paths, env=None) -> list[str]:
     for path in paths:
         if not isinstance(path, str) or not os.path.isabs(path):
             raise ValueError(f"{path!r} is not an absolute path")
+        _no_stream(path)
         real = os.path.realpath(path)
-        home = next((d for d in dirs if os.path.commonpath([real, d]) == d), None)
+        _no_stream(real)
+        home = _home(real, dirs)
         if home is None:
             raise PermissionError(
                 f"{path} is not inside a directory uploads may come from "
@@ -1048,7 +1063,32 @@ def uploadable(paths, env=None) -> list[str]:
 
 
 def _home(real: str, dirs: list[str]):
-    return next((d for d in dirs if os.path.commonpath([real, d]) == d), None)
+    """The named directory `real` lies in, or None.
+
+    Compared as this system compares paths, without case on Windows, where
+    `commonpath` keeps the case of what it is given: `c:/up/a.pdf` under
+    `C:/up` read as outside it. And a path on another drive than a directory
+    is simply not in it, which `commonpath` says by raising.
+    """
+    key = os.path.normcase(real)
+    for d in dirs:
+        with swallow("a path on another drive is not inside this directory"):
+            if os.path.commonpath([key, os.path.normcase(d)]) == os.path.normcase(d):
+                return d
+    return None
+
+
+def _no_stream(path: str) -> None:
+    """Refuse an NTFS alternate data stream, `a.pdf:Zone.Identifier`.
+
+    On Windows a colon after the drive names a stream inside the file, and a
+    stream is opened, sized and copied like the file itself - so the guard
+    above would send the mark of the web a download carries, or anything else
+    hidden in a stream, under the file's own name. Elsewhere a colon is an
+    ordinary character in a name.
+    """
+    if os.name == "nt" and ":" in os.path.splitdrive(path)[1]:
+        raise ValueError(f"{path} names an alternate data stream, not a file; not sent")
 
 
 def _no_hidden(path: str, real: str, home: str) -> None:
@@ -1075,10 +1115,14 @@ def _opened_path(fd: int, real: str, st) -> str:
     return real
 
 
-#: How long a snapshot outlives its call. Firefox reads a picked file's bytes
-#: when the page sends it, not when it is picked, so the copy has to be there
-#: for the submit that follows; an hour is longer than any form takes.
-SNAPSHOT_KEEP_S = 3600
+#: ⛔ A SNAPSHOT LIVES AS LONG AS THE BROWSER IT WAS GIVEN TO. Firefox reads a
+#: picked file's bytes when the page sends it, not when it is picked, so the
+#: copy must outlast the call; it is handed to the session, which removes it
+#: when the browser closes (`StealthSession.keep_until_closed`). One left by a
+#: process that ended without closing its browsers is removed by the next
+#: upload, once that process is gone: its id is in the directory's name.
+#: Copies used to be kept for an hour after their call and removed only by a
+#: later upload, so a server that closed left them in %TEMP% for good.
 
 
 def snapshot_files(files: list[str], env=None) -> list[str]:
@@ -1096,7 +1140,7 @@ def snapshot_files(files: list[str], env=None) -> list[str]:
     """
     dirs = upload_dirs(env)
     _expire_snapshots()
-    root = tempfile.mkdtemp(prefix=_SNAPSHOT_PREFIX)
+    root = tempfile.mkdtemp(prefix="%s%d-" % (_SNAPSHOT_PREFIX, os.getpid()))
     try:
         out, total = [], 0
         for i, real in enumerate(files):
@@ -1147,57 +1191,116 @@ _SNAPSHOT_PREFIX = "invisible-upload-"
 
 
 def _expire_snapshots() -> None:
-    """Snapshots older than SNAPSHOT_KEEP_S, from this or an earlier process."""
+    """Snapshots left by processes that are no longer running."""
     base = tempfile.gettempdir()
     with swallow("a snapshot directory that cannot be listed is left alone"):
         for name in os.listdir(base):
             path = os.path.join(base, name)
             if not name.startswith(_SNAPSHOT_PREFIX) or os.path.islink(path):
                 continue
+            owner = name[len(_SNAPSHOT_PREFIX):].split("-", 1)[0]
+            if owner.isdigit() and process.alive(int(owner)):
+                continue
             with swallow("another process may expire it first"):
-                if time.time() - os.stat(path).st_mtime > SNAPSHOT_KEEP_S:
-                    shutil.rmtree(path)
+                shutil.rmtree(path)
+
+
+#: Which label opens a hidden file input: the first of its labels a person can
+#: see, as `for` (pointing at it by id) or `wrap` (the input inside it), with
+#: the position among the labels that share the same `for`. None when no label
+#: is shown, which leaves the caller to name the button that opens it.
+_OPENER_JS = """el => {
+  const shown = l => { const r = l.getBoundingClientRect(), s = getComputedStyle(l);
+    return r.width > 1 && r.height > 1 && s.visibility !== "hidden"
+        && s.display !== "none" && +s.opacity > 0.01; };
+  for (const l of (el.labels || [])) {
+    if (!shown(l)) continue;
+    if (l.contains(el)) return {how: "wrap"};
+    if (l.htmlFor && l.htmlFor === el.id) {
+      const root = l.getRootNode();
+      const same = Array.from(root.querySelectorAll("label")).filter(x => x.htmlFor === el.id);
+      return {how: "for", id: el.id, nth: same.indexOf(l) + 1, of: same.length};
+    }
+  }
+  return null;
+}"""
+
+
+async def _opener(page, selector: str, target: dict) -> str:
+    """The selector a person would click to open this input's chooser.
+
+    The input itself when it is shown; for a hidden one, the label in front of
+    it. A hidden input with no shown label is refused with what to pass
+    instead: whatever opens it is a button the page wired by script, and only
+    the caller can see which one it is.
+    """
+    if not target["file"] or target["shown"]:
+        return selector
+    found = await page.eval_on_selector(selector, _OPENER_JS)
+    if not found:
+        raise RuntimeError(
+            f"{selector} is a hidden file input, and no label on the page opens "
+            "it. A page cannot get files into a hidden input without somebody "
+            "clicking what opens it, so give the selector of the button or link "
+            "that does (browser_snapshot lists it).")
+    if found["how"] == "wrap":
+        return f"{selector} >> xpath=ancestor::label[1]"
+    css = "label[for=%s]" % json.dumps(found["id"])
+    return css if found["of"] == 1 else ":nth-match(%s, %d)" % (css, found["nth"])
+
+
+async def _open_chooser(session, opener: str):
+    """Click what opens the chooser, with the real pointer, and return it.
+
+    The wait for the chooser starts with the click and is not bounded by it:
+    the click has its own action timeout, and a chooser that has not opened an
+    action timeout after the click has landed is one the click does not open.
+    """
+    page = session.page()
+    waiter = asyncio.ensure_future(page.wait_for_event("filechooser", timeout=0))
+    try:
+        await _on_selector(session, opener, "click",
+                           lambda: page.click(opener, timeout=ACTION_TIMEOUT_MS))
+        return await asyncio.wait_for(waiter, ACTION_TIMEOUT_MS / 1000)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"clicking {opener} opened no file chooser. Give the selector of the "
+            "<input type=file>, or of the button or label that opens it "
+            "(browser_snapshot lists both).") from None
+    finally:
+        waiter.cancel()
 
 
 async def upload_files(session, selector: str, paths) -> str:
-    """Attach local files to a file input, through its file chooser."""
+    """Attach local files to a file input, through its file chooser.
+
+    The files are checked before any page is touched, the thing that opens the
+    chooser is clicked with the real pointer, the chooser is answered after the
+    time a person takes to find and confirm a file - two of this session's
+    hesitations, drawn from the same persona its typing uses - and the input is
+    read back.
+    """
     named = uploadable(paths)
     page = session.page()
     target = await _on_selector(session, selector, "upload",
                                 lambda: page.eval_on_selector(selector, _FILE_INPUT_JS))
-    names = ", ".join(os.path.basename(f) for f in named)
     if len(named) > 1 and target["file"] and not target["multiple"]:
         raise RuntimeError(f"{selector} takes one file; upload them one at a time")
+    opener = await _opener(page, selector, target)
     files = snapshot_files(named)
+    session.keep_until_closed(os.path.dirname(os.path.dirname(files[0])))
+    chooser = await _open_chooser(session, opener)
+    if len(files) > 1 and not chooser.is_multiple():
+        raise RuntimeError(
+            f"the chooser {opener} opened takes one file; nothing was attached. "
+            "Upload them one at a time")
+    await asyncio.sleep(_hesitation(session, "mcp:file-chooser", times=2))
+    await chooser.set_files(files, timeout=ACTION_TIMEOUT_MS)
+    held = await _held(chooser.element.evaluate(_FILE_NAMES_JS))
 
-    if target["file"] and not target["shown"]:
-        if len(files) > 1 and not target["multiple"]:
-            raise RuntimeError(f"{selector} takes one file; upload them one at a time")
-        await _on_selector(session, selector, "upload",
-                           lambda: page.set_input_files(selector, files, timeout=15_000))
-        how = "the input is hidden, so given them directly, as its chooser does"
-        held = await _held(page.eval_on_selector(selector, _FILE_NAMES_JS))
-    else:
-        try:
-            async with page.expect_file_chooser(timeout=CHOOSER_MS) as chosen:
-                await _on_selector(session, selector, "click",
-                                   lambda: page.click(selector, timeout=15_000))
-            chooser = await chosen.value
-        except Exception as exc:
-            if "Timeout" not in type(exc).__name__ and "imeout" not in str(exc):
-                raise
-            raise RuntimeError(
-                f"clicking {selector} opened no file chooser. Give the selector of "
-                "the <input type=file>, or of the button or label that opens it "
-                "(browser_snapshot lists both).") from None
-        if len(files) > 1 and not chooser.is_multiple():
-            raise RuntimeError(
-                f"the chooser {selector} opened takes one file; nothing was "
-                "attached. Upload them one at a time")
-        await chooser.set_files(files, timeout=15_000)
-        how = "picked in the file chooser"
-        held = await _held(chooser.element.evaluate(_FILE_NAMES_JS))
-
+    names = ", ".join(os.path.basename(f) for f in named)
+    how = "picked in the file chooser" if opener == selector else (
+        "picked in the file chooser its label %s opened" % opener)
     said = f"attached {len(files)} file{'s' if len(files) != 1 else ''} to {selector} ({how}): {names}"
     want = [os.path.basename(f) for f in files]
     if held is None or held == want:

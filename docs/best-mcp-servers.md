@@ -52,8 +52,8 @@ can show you exactly what a server exposes. A server that can delete should be
 a deliberate choice.
 
 **What it costs in context.** Every tool description travels in the model's
-context on every turn, and so does the JSON schema of its arguments. Measured on our own browser server on 2026-09-15: **16 tools, 3,141 tokens resent on every single turn**
-(8,264 characters of description, counted with a tokenizer). Two servers of that
+context on every turn, and so does the JSON schema of its arguments. Measured on our own browser server on 2026-10-02: **17 tools, 3,464 tokens resent on every single turn**
+(8,918 characters of description, counted with a tokenizer). Two servers of that
 size on a forty-turn session spend about 255,000 tokens restating what the tools
 are, before a single page has been read.
 

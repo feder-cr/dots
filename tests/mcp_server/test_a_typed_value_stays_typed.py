@@ -91,7 +91,7 @@ class _Seeded:
         self.seed = seed
         self._n = 0
 
-    def next_typing_nonce(self):
+    def next_pause_nonce(self):
         self._n += 1
         return self._n
 

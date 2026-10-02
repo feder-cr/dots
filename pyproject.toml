@@ -67,7 +67,13 @@ dependencies = [
     # any page that replaces itself from script while it loads waited 45 s
     # for a navigation that was gone, and the browser froze in a long
     # session once Firefox had written a pipe buffer of output.
-    "invisible-playwright>=0.25.7",
+    #
+    # And to 0.25.8 for browser_upload_files: below it, a file chooser opened
+    # for a hidden <input type=file>, by the label or button in front of it,
+    # timed out asking the hidden input for a box to point at, after the
+    # chooser had already opened. That is the commonest upload widget, and
+    # every upload here goes through a chooser.
+    "invisible-playwright>=0.25.8",
     # HTML parsing for browser_read_html. Chosen over lxml by measurement: on
     # six real pages both found byte-identical sets of interactive elements,
     # so correctness did not separate them, and selectolax then parsed 3-5x

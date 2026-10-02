@@ -622,15 +622,14 @@ async def browser_upload_files(selector: str, paths: list[str],
 
     `selector` is the `<input type=file>` itself, or the button or label that
     opens its chooser: that is clicked with the real pointer and the chooser
-    answered with `paths`. A hidden input is given the files directly, which
-    is what its chooser does. Several files need an input that takes several;
-    otherwise upload them one call at a time.
+    answered with `paths`. A hidden input is opened through its label; with
+    none, pass the button that opens it. Several files need an input that
+    takes several; otherwise upload them one call at a time.
 
     Each path is absolute and names a regular file inside a directory listed
     in INVISIBLE_MCP_UPLOAD_DIRS, through no hidden directory; with none
     listed, uploads are off. Never use browser_evaluate to set `files`."""
-    return await work.acting(actions.upload_files, selector, paths, role=browser,
-                             exclusive=True)
+    return await work.acting(actions.upload_files, selector, paths, role=browser)
 
 
 @mcp.tool(annotations=_says("Press a key", destructive=True))

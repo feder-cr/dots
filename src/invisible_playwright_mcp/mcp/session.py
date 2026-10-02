@@ -41,9 +41,13 @@ class StealthSession:
         # The clock a frame's age is read from. An attribute so a test can move
         # time instead of sleeping through STALE_AFTER.
         self._clock = time.monotonic
-        # How many pauses before typing this browser has drawn, so two fields
-        # in one session do not get the same one.
-        self._typing_nonce = 0
+        # How many hesitations this browser has drawn, so two acts in one
+        # session do not get the same one.
+        self._pause_nonce = 0
+        # Directories this browser was given files from (upload snapshots),
+        # removed when it closes: Firefox reads a picked file when the page
+        # sends it, so they must last exactly as long as the browser does.
+        self._kept: list[str] = []
 
     @property
     def seed(self):
@@ -51,9 +55,12 @@ class StealthSession:
         its typing rhythm is drawn from. None when it was launched without one."""
         return self._kwargs.get("seed")
 
-    def next_typing_nonce(self) -> int:
-        self._typing_nonce += 1
-        return self._typing_nonce
+    def next_pause_nonce(self) -> int:
+        self._pause_nonce += 1
+        return self._pause_nonce
+
+    def keep_until_closed(self, path: str) -> None:
+        self._kept.append(path)
 
     async def _attach(self, result) -> None:
         """`InvisiblePlaywright.__aenter__()` returns a Browser in ephemeral
@@ -276,3 +283,12 @@ class StealthSession:
             finally:
                 self._ipw = None
                 self._browser = None
+                self._forget_kept()
+
+    def _forget_kept(self) -> None:
+        """Remove what was kept for the browser, now that nothing can read it."""
+        import shutil
+
+        for path in self._kept:
+            shutil.rmtree(path, ignore_errors=True)
+        self._kept.clear()
