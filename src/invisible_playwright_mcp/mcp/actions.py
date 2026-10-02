@@ -24,6 +24,8 @@ import tempfile
 import time
 from typing import Any
 
+from invisible_playwright import hesitation
+
 from . import clean, process
 from ..quiet import swallow
 
@@ -1294,7 +1296,8 @@ async def upload_files(session, selector: str, paths) -> str:
         raise RuntimeError(
             f"the chooser {opener} opened takes one file; nothing was attached. "
             "Upload them one at a time")
-    await asyncio.sleep(_hesitation(session, "mcp:file-chooser", times=2))
+    await asyncio.sleep(hesitation(session.seed, "mcp:file-chooser",
+                                   nonce=session.next_pause_nonce(), times=2))
     await chooser.set_files(files, timeout=ACTION_TIMEOUT_MS)
     held = await _held(chooser.element.evaluate(_FILE_NAMES_JS))
 

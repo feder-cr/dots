@@ -233,9 +233,14 @@ class _Session:
     def __init__(self, page):
         self._page = page
         self.kept = []
+        self.nonces = 0
 
     def page(self):
         return self._page
+
+    def next_pause_nonce(self):
+        self.nonces += 1
+        return self.nonces
 
     def keep_until_closed(self, path):
         self.kept.append(path)
@@ -296,14 +301,23 @@ def test_the_chooser_is_answered_after_a_persons_pause(env, monkeypatch):
     the change, which no person picks a file in. Known-bad: drop the pause."""
     page = _Page({"file": True, "multiple": False, "shown": True})
 
-    def pause(session, tag, times=1):
-        page.calls.append(("pause", tag, times))
+    def pause(seed, act, *, nonce=0, times=1):
+        page.calls.append(("pause", act, nonce, times))
         return 0.0
 
-    monkeypatch.setattr(actions, "_hesitation", pause)
+    monkeypatch.setattr(actions, "hesitation", pause)
     _upload(page, [str(env / "a.pdf")])
     assert [c[0] for c in page.calls] == ["click", "pause", "chooser"]
-    assert page.calls[1] == ("pause", "mcp:file-chooser", 2)
+    assert page.calls[1] == ("pause", "mcp:file-chooser", 1, 2)
+
+
+def test_the_chooser_pause_is_the_wrappers_public_one():
+    """The hesitation is drawn by the wrapper's public function, not rebuilt
+    here from its private names. Known-bad: `invisible_playwright._behaviour`
+    imported by this server, with the spread of a hesitation copied in."""
+    import invisible_playwright
+
+    assert actions.hesitation is invisible_playwright.hesitation
 
 
 def test_the_copies_belong_to_the_browser_and_go_when_it_closes(env, tmp_path):
@@ -447,15 +461,8 @@ def test_a_hidden_input_is_opened_by_its_label_after_a_persons_pause(url, env):
     assert clicks and clicks[0][1] == "pick" and clicks[0][2], order
     assert change[1] == "behind" and change[2], order
 
-    class _Seeded:
-        def __init__(self):
-            self.seed, self.n = seed, 0
-
-        def next_pause_nonce(self):
-            self.n += 1
-            return self.n
-
-    pause = actions._hesitation(_Seeded(), "mcp:file-chooser", times=2)
+    # The first act of this session that draws a pause, so its nonce is 1.
+    pause = actions.hesitation(seed, "mcp:file-chooser", nonce=1, times=2)
     assert (change[3] - clicks[0][3]) / 1000 >= pause * 0.9, (
         "the change came %.0f ms after the click, before this session's pause "
         "of %.0f ms" % (change[3] - clicks[0][3], pause * 1000))
