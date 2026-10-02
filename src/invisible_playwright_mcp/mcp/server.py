@@ -590,7 +590,9 @@ async def browser_click_at(x: float, y: float, hold_seconds: float = 0.0,
 
 
 @mcp.tool(annotations=_says("Type into a field", destructive=True))
-async def browser_type(selector: str, text: str, browser: Browser = None) -> str:
+async def browser_type(selector: str, text: str, browser: Browser = None,
+                       expect_origin: str | None = None,
+                       expect_input_type: str | None = None) -> str:
     """Fill a field, replacing whatever it holds.
 
     Up to 80 characters are typed key by key at a human pace (about 0.4 s a
@@ -598,9 +600,16 @@ async def browser_type(selector: str, text: str, browser: Browser = None) -> str
     one trusted input event, and the field's maxlength applies. The field is
     read back once the page has answered; text the page dropped while it
     arrived is typed again. Calls that act on the same browser run one at a
-    time, in order."""
-    return await work.acting(actions.type_text, selector, text, role=browser,
-                             exclusive=True)
+    time, in order.
+
+    expect_origin (e.g. "https://login.example.com") writes only if the field's
+    own page is on that origin at the moment of writing, and nothing otherwise:
+    for credentials, so a page that navigates away mid-fill cannot receive them.
+    With it the value is set in one step, with trusted input and change events
+    and no keystrokes. expect_input_type (e.g. "password", with expect_origin)
+    also requires the field to be that type at the moment of writing."""
+    return await work.acting(actions.type_text, selector, text, expect_origin,
+                             expect_input_type, role=browser, exclusive=True)
 
 
 @mcp.tool(annotations=_says("Choose a dropdown option", destructive=True))

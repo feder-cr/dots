@@ -704,9 +704,43 @@ async def _type_and_keep(session, selector: str, text: str) -> str:
     return f"typed into {selector}; the page shows it as {shown!r}"
 
 
-async def type_text(session, selector: str, text: str) -> str:
-    return await _on_selector(session, selector, "typing",
-                              lambda: _type_and_keep(session, selector, text))
+async def type_text(session, selector: str, text: str,
+                    expect_origin: str | None = None,
+                    expect_input_type: str | None = None) -> str:
+    if expect_input_type is not None and expect_origin is None:
+        raise ValueError("expect_input_type is only accepted together with expect_origin")
+    if expect_origin is None:
+        return await _on_selector(session, selector, "typing",
+                                  lambda: _type_and_keep(session, selector, text))
+    # expect_origin hands the check to the engine, which makes it in the same
+    # in-page step as the write and then sends trusted input/change events:
+    # checking here and filling afterwards would leave a gap in which the page
+    # could navigate, and fill TYPES a text field key by key, so a navigation
+    # during typing would send the rest of the text to the next page.
+    #
+    # This is the credential path, so a failure says only what happened. The
+    # selector diagnosis is skipped (it reads page text, which may by then hold
+    # the value), the engine's exception is not chained, and the text is
+    # removed from the message in case anything upstream echoed it.
+    try:
+        kwargs = {"timeout": 15_000, "expect_origin": expect_origin}
+        if expect_input_type is not None:
+            kwargs["expect_input_type"] = expect_input_type
+        await session.page().fill(selector, text, **kwargs)
+    except Exception as exc:
+        message = str(exc)
+        if "nothing was written" in message:
+            raise RuntimeError(
+                "expect_origin refused: the field's page is not on %s or the "
+                "field changed; nothing was written" % expect_origin) from None
+        safe = "; ".join(p for p in message.split("; ") if "origin" in p or "written" in p)
+        safe = (safe or type(exc).__name__)[:300]
+        if text:
+            safe = safe.replace(text, "[redacted]")
+        raise RuntimeError(
+            "typing with expect_origin=%s failed; the write outcome is unknown: %s"
+            % (expect_origin, safe)) from None
+    return f"typed into {selector}"
 
 
 async def select_option(session, selector: str, value: str) -> str:
