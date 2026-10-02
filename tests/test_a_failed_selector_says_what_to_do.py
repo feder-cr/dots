@@ -45,18 +45,14 @@ class _Element:
 class _Page:
     """A page where the action fails and the diagnosis answers `why`.
 
-    The diagnosis asks the ENGINE (query_selector_all), as the action does, and
-    a selector the engine matches nothing for fails the presence check before
-    any action is attempted.
+    The diagnosis asks the ENGINE (query_selector_all), as the action does.
+    `attempts` counts what was tried, since every attempt is a full timeout.
     """
 
     def __init__(self, why):
         self.why = why
         self.asked = []
-
-    async def wait_for_selector(self, selector, **kw):
-        if self.why is not None and not self.why.get("matches"):
-            raise TimeoutError("Page.waitForSelector: %r did not become attached in 3s" % selector)
+        self.attempts = []
 
     async def query_selector_all(self, selector):
         self.asked.append(selector)
@@ -71,6 +67,7 @@ class _Page:
         raise TimeoutError("Page.fill: %r not actionable in 15s" % selector)
 
     async def select_option(self, selector, **kw):
+        self.attempts.append(("select_option", kw))
         raise TimeoutError("Page.selectOption: %r not actionable in 15s" % selector)
 
 
@@ -169,3 +166,63 @@ async def test_a_page_that_cannot_be_asked_does_not_swallow_the_real_failure():
     session._page = _Mute(None)
     with pytest.raises(TimeoutError, match="not actionable"):
         await actions.click(session, "#gone")
+
+
+async def test_a_select_is_attempted_once_because_the_driver_matches_both():
+    """Every attempt is a full timeout, and the driver's `value=` already
+    matches a value or a label (`valueOrLabel`). Known-bad: the old second
+    attempt by label, which measured 30.2 s against 15.1 s for a click on the
+    same selector matching nothing."""
+    _, page = await _fails(lambda s: actions.select_option(s, "#gone", "MENS"),
+                           {"matches": 0})
+    assert [name for name, _ in page.attempts] == ["select_option"], page.attempts
+    assert page.attempts[0][1].get("value") == "MENS"
+
+
+class _Chooses(_Page):
+    """A select that takes whatever it is asked for, and answers its values."""
+
+    def __init__(self, options):
+        super().__init__({"matches": 1})
+        self.options = options
+
+    async def select_option(self, selector, **kw):
+        self.attempts.append(("select_option", kw))
+        asked = kw["value"]
+        return [v for v, label in self.options if asked in (v, label)][:1]
+
+
+@pytest.mark.parametrize("asked,how", [("b", "value"), ("Beta", "label")])
+async def test_the_answer_says_whether_it_matched_the_value_or_the_label(asked, how):
+    session = _Session(None)
+    session._page = _Chooses([("a", "Alpha"), ("b", "Beta")])
+    said = await actions.select_option(session, "#s", asked)
+    assert said == "selected #s by %s: ['b']" % how
+
+
+def test_the_driver_sends_a_value_as_value_or_label():
+    """The one attempt above is only enough because of this. If the driver
+    ever sent `value=` as a plain value again, a label would stop matching
+    and the tool would refuse what the page shows."""
+    from invisible_playwright._pw._impl._element_handle import convert_select_option_values
+
+    assert convert_select_option_values(value="Beta")["options"] == [{"valueOrLabel": "Beta"}]
+
+
+class _NoSuchOption(_Page):
+    async def select_option(self, selector, **kw):
+        self.attempts.append(("select_option", kw))
+        raise RuntimeError("Page.select_option: selectOptions: error:optionsnotfound")
+
+
+async def test_a_select_with_no_such_option_says_so_and_not_momentary():
+    """Measured: the driver refuses in 0.25 s with `error:optionsnotfound`, the
+    diagnosis finds the element fine, and the answer was "momentary" - advice to
+    retry something that can never work. Known-bad: let that error reach
+    `_on_selector` untranslated."""
+    session = _Session(None)
+    session._page = _NoSuchOption({"matches": 1, "width": 64, "height": 23})
+    with pytest.raises(RuntimeError) as caught:
+        await actions.select_option(session, "#s", "Gamma")
+    said = str(caught.value)
+    assert said == "no option in #s has the value or the label 'Gamma'", said

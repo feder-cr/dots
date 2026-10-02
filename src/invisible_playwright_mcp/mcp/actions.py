@@ -590,13 +590,6 @@ def next_move(why: dict) -> str:
             "action was momentary. Look at the page before trying again.")
 
 
-#: How long a selector may match nothing before an action gives up on it.
-#: Long enough for an element a click has just asked for to arrive; short
-#: enough that a selector the page will never match costs seconds rather than
-#: the whole action timeout. It was the whole timeout - fifteen seconds, and on
-#: 2026-09-30 thirty - for an answer the page could give at once.
-PRESENCE_MS = 3_000
-
 #: What the engine says when a selector cannot be parsed, as opposed to when the
 #: page could not be asked. Only these become `bad_selector`: anything else -
 #: a navigation, a closed page - is not the caller's selector's fault.
@@ -637,28 +630,6 @@ def _explain(exc, what: str, why: dict) -> RuntimeError:
         % (exc, what, json.dumps(why), next_move(why)))
 
 
-async def _require_present(session, selector: str, what: str) -> None:
-    """Fail in seconds, with the reason, when nothing matches `selector`.
-
-    ⛔ A SELECTOR THAT MATCHES NOTHING USED TO COST THE WHOLE ACTION TIMEOUT.
-    The action retries until its deadline because the element might still
-    appear, which is right for an element that is coming and pure waste for
-    one that is not - and the caller cannot tell which it was until the end.
-    Measured 2026-09-30: `#firstName input` on such a form waited thirty
-    seconds and then reported `{"matches": 0}`.
-    """
-    page = session.page()
-    try:
-        await page.wait_for_selector(selector, state="attached", timeout=PRESENCE_MS)
-    except Exception as exc:
-        why = await _diagnose(page, selector)
-        if why is None:
-            raise
-        if why.get("matches") and not why.get("bad_selector"):
-            return  # it arrived just as the wait gave up
-        raise _explain(exc, what, why) from exc
-
-
 async def _on_selector(session, selector: str, what: str, act):
     """Run an action aimed at a selector, and when it fails say why and what
     follows from it.
@@ -668,8 +639,19 @@ async def _on_selector(session, selector: str, what: str, act):
     Measured across eighteen real sites, four clicks failed and every one of
     them failed that way: a logo, a footer link, a shipping button. Fifteen
     seconds spent to learn nothing.
+
+    ⛔ AND A SELECTOR THAT MATCHES NOTHING GETS THE WHOLE TIMEOUT, ON PURPOSE.
+    Giving up on it after a few seconds was tried and measured as a
+    regression: a button a page adds five seconds after load was clicked at
+    5.4 s with the full wait and refused at 3.1 s with a three-second one. No
+    shorter wait is right either, because what the page will do next is not
+    something it shows: a timer that is about to add the element leaves no
+    mutation, no request and no navigation behind it, so a document that has
+    been still for any length of time is indistinguishable from one that is
+    finished. The early answers that ARE certain come without asking for
+    them: a selector the engine cannot parse is refused in under a second,
+    and so is an action the engine itself rejects.
     """
-    await _require_present(session, selector, what)
     try:
         return await act()
     except Exception as exc:
@@ -729,35 +711,47 @@ async def select_option(session, selector: str, value: str) -> str:
     for. A missing tool is not a neutral gap: the model routes around it, and the
     route it finds is worse than the tool would have been.
 
-    BOTH value and label, tried in that order, because a model reads the page and
-    what a page shows is the LABEL. Asking it for the `value` attribute means
-    asking it to read markup it may never have fetched, and a tool that needs the
-    caller to know a hidden attribute is a tool that gets used wrong.
+    BOTH value and label, because a model reads the page and what a page shows
+    is the LABEL. Asking it for the `value` attribute means asking it to read
+    markup it may never have fetched, and a tool that needs the caller to know a
+    hidden attribute is a tool that gets used wrong.
+
+    ⛔ ONE ATTEMPT, BECAUSE THE DRIVER ALREADY MATCHES BOTH. `value=` reaches it
+    as `valueOrLabel`, which selects an option whose value OR whose label is
+    the string. This used to try the value and then, on failure, the label -
+    and the second attempt could only fail where the first had, after waiting
+    its own full timeout. Measured: a selector matching nothing failed after
+    30.2 s, two timeouts, where a click on the same selector took 15.1 s.
+    `tests/test_a_failed_selector_says_what_to_do.py` holds the driver to that
+    mapping, and `tests/mcp_server/test_shadow_roots.py` to a label chosen on a
+    real page.
     """
     page = session.page()
-    # Before the first attempt too: it is not explained, and it would otherwise
-    # spend its whole timeout on a selector that matches nothing.
-    await _require_present(session, selector, "select")
-    # Not an error yet: `value` may well have been a label. The second attempt
-    # is what decides, and its failure is the one worth reporting.
-    with swallow("the value may have been a label; the second attempt decides"):
-        chosen = await page.select_option(selector, value=value, timeout=15_000)
-        if chosen:
-            return f"selected {selector} by value: {chosen}"
-    # ⛔ THE SECOND ATTEMPT GOES THROUGH THE SAME EXPLANATION AS THE OTHER TWO
-    # SELECTOR TOOLS. Its failure used to be Playwright's bare timeout, so a
-    # `<select>` that was not there and a `<select>` that was covered arrived as
-    # the same sentence - the one thing a caller cannot act on.
-    chosen = await _on_selector(
-        session, selector, "select",
-        lambda: page.select_option(selector, label=value, timeout=15_000))
+
+    async def choose():
+        try:
+            return await page.select_option(selector, value=value, timeout=15_000)
+        except Exception as exc:
+            # ⛔ THE SELECT WAS FOUND AND HAS NO SUCH OPTION, which the driver
+            # says as `error:optionsnotfound` and the diagnosis below cannot
+            # see: it looks at the element, finds it fine, and called the
+            # failure "momentary" - advice to try again what can never work.
+            # It is the same fact as an empty answer, so it takes the same road.
+            if "optionsnotfound" in str(exc):
+                return []
+            raise
+
+    chosen = await _on_selector(session, selector, "select", choose)
     if not chosen:
-        # Playwright answers with an empty list rather than raising when nothing
-        # matched, so a caller reading only the exception would believe it had
-        # worked and go on to submit a form that never changed.
+        # Playwright can also answer with an empty list rather than raising
+        # when nothing matched, so a caller reading only the exception would
+        # believe it had worked and go on to submit a form that never changed.
         raise RuntimeError(
             f"no option in {selector} has the value or the label {value!r}")
-    return f"selected {selector} by label: {chosen}"
+    # Which of the two it matched, read off what was chosen rather than
+    # guessed: an option whose value is the string was matched by its value.
+    how = "value" if value in chosen else "label"
+    return f"selected {selector} by {how}: {chosen}"
 
 
 async def press_key(session, key: str) -> str:

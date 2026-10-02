@@ -69,6 +69,18 @@ PAGE = b"""<!doctype html>
 <x-card id="card"></x-card>
 <x-sealed id="sealed"></x-sealed>
 <input id="plain" name="plain" type="text">
+<select id="size" name="size"><option value="s">Small</option><option value="l">Large</option></select>
+<div id="slot"></div>
+<script>
+  // Added by a timer and nothing else: no mutation, request or navigation
+  // happens before it, so nothing the page shows says it is coming.
+  setTimeout(() => {
+    const b = document.createElement('button');
+    b.id = 'late'; b.type = 'button'; b.textContent = 'Late';
+    b.addEventListener('click', () => { document.title = 'late clicked'; });
+    document.getElementById('slot').appendChild(b);
+  }, 5000);
+</script>
 </body></html>"""
 
 
@@ -164,10 +176,13 @@ def test_every_shadow_selector_the_snapshot_gives_can_be_used(run):
 
 @pytest.mark.e2e
 @pytest.mark.xfail(strict=True, reason=(
-    "engine: Page.dispatchTrustedInputEvents answers NS_ERROR_UNEXPECTED for a "
-    "node inside a shadow tree (dispatchDOMEventViaPresShellForTesting needs an "
-    "uncomposed document). Fixed in invisible_playwright, not here; strict, so "
-    "this turns red the day the pinned engine is fixed and the mark must go."))
+    "engine: on firefox-34, the engine the packaged seal pins, juggler's "
+    "Page.dispatchTrustedInputEvents answers NS_ERROR_UNEXPECTED for a node "
+    "inside a shadow tree (dispatchDOMEventViaPresShellForTesting needs an "
+    "uncomposed document). The patched juggler replaces that command with "
+    "Page.selectOptions, which sets this select; nothing in this package can. "
+    "Strict, so it turns red the day the seal moves to that engine, and the "
+    "mark must go then."))
 def test_a_select_inside_a_shadow_root_can_be_set(run):
     async def body(s):
         await actions.select_option(s, "#state >> #select", "Texas")
@@ -186,12 +201,39 @@ def test_a_descendant_selector_across_the_boundary_works_too(run):
 
 
 @pytest.mark.e2e
-def test_nothing_matching_fails_fast_and_says_so(run):
+def test_an_element_a_timer_adds_later_is_still_reached(run):
+    """The regression a short presence wait caused, measured: this button,
+    added five seconds after load, was clicked at 5.4 s with the full action
+    timeout and refused at 3.1 s with a three-second wait. Nothing on the page
+    announces it, so no shorter wait can be right for it."""
+    async def body(s):
+        t = time.monotonic()
+        said = await actions.click(s, "#late")
+        return time.monotonic() - t, said, await s.page().title()
+    took, said, title = run(body)
+    assert said == "clicked #late" and title == "late clicked"
+    assert took >= 4.5, "the button was there before the timer, the test proves nothing"
+
+
+@pytest.mark.e2e
+def test_a_selector_the_engine_cannot_parse_fails_at_once(run):
+    """The early answer that is certain: the engine refuses the syntax, and
+    the diagnosis says so instead of calling it a missing element."""
     async def body(s):
         t = time.monotonic()
         with pytest.raises(RuntimeError) as err:
-            await actions.type_text(s, "#nowhere input", "x")
+            await actions.click(s, "#plain[")
         return time.monotonic() - t, str(err.value)
     took, message = run(body)
-    assert '"matches": 0' in message
-    assert took < 8, "a selector matching nothing took %.1fs to fail" % took
+    assert '"bad_selector": true' in message, message
+    assert took < 3, "a selector that cannot be parsed took %.1fs to refuse" % took
+
+
+@pytest.mark.e2e
+def test_a_select_is_set_by_the_label_it_shows_in_one_attempt(run):
+    """`value=` reaches the driver as value-or-label, so the label a page
+    shows is matched without a second attempt."""
+    async def body(s):
+        said = await actions.select_option(s, "#size", "Large")
+        return said, await s.page().locator("#size").input_value()
+    assert run(body) == ("selected #size by label: ['l']", "l")
