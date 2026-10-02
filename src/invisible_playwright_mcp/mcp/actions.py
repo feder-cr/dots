@@ -735,7 +735,16 @@ async def type_text(session, selector: str, text: str,
         # has focus, so nothing answers it. Every write is origin-locked again,
         # and the readback is one bit, whether the field is empty: the value
         # itself, its length or a digest of it is never read.
-        if not text or not await _emptied(page, selector, began):
+        if not text:
+            return f"typed into {selector}"
+        emptied = await _emptied(page, selector, began)
+        if emptied is None:
+            raise RuntimeError(
+                f"{selector} was written with expect_origin but could not be "
+                "read back (it no longer matches a field on this page), so "
+                "whether it kept the value is not known. The write outcome "
+                "is unknown.")
+        if not emptied:
             return f"typed into {selector}"
     raise RuntimeError(
         f"{selector} did not keep the value written with expect_origin: "
@@ -744,22 +753,27 @@ async def type_text(session, selector: str, text: str,
 
 
 async def _is_empty(page, selector: str):
-    """Whether the field is empty, or None when it cannot be asked."""
+    """Whether the field is empty, or None when it cannot be asked.
+
+    Asked of the first match, as fill writes the first match: a locator would
+    refuse a selector matching two elements that fill had just written into.
+    A target with no value property (a contenteditable) is never empty."""
     try:
-        return bool(await page.locator(selector).evaluate(
-            "el => 'value' in el && el.value === ''", timeout=5_000))
+        return bool(await asyncio.wait_for(page.eval_on_selector(
+            selector, "el => 'value' in el && el.value === ''"), 5))
     except Exception:
         return None
 
 
-async def _emptied(page, selector: str, began: float) -> bool:
+async def _emptied(page, selector: str, began: float):
     """True once the page has emptied the field, read until it has stayed
-    filled SETTLE_S after the write and SINCE_FOCUS_S after the call began."""
+    filled SETTLE_S after the write and SINCE_FOCUS_S after the call began.
+    None when the field cannot be read back, which proves nothing either way."""
     loop_end = max(time.monotonic() + SETTLE_S, began + SINCE_FOCUS_S)
     while True:
         empty = await _is_empty(page, selector)
         if empty is None:
-            return False
+            return None
         if empty:
             return True
         if time.monotonic() >= loop_end:

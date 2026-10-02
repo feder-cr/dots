@@ -25,6 +25,9 @@ class _Page:
     async def fill(self, selector, text, **kw):
         self.calls.append((selector, text, kw))
 
+    async def eval_on_selector(self, selector, expression, arg=None):
+        return False  # the field kept what was written
+
 
 class _Session:
     def __init__(self):

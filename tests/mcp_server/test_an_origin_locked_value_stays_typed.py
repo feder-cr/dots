@@ -31,17 +31,6 @@ def quick(monkeypatch):
     monkeypatch.setattr(actions, "SINCE_FOCUS_S", 0.05)
 
 
-class _Locator:
-    def __init__(self, page, selector):
-        self.page, self.selector = page, selector
-
-    async def evaluate(self, expression, arg=None, timeout=None):
-        self.page.reads.append(expression)
-        if self.page.unreadable:
-            raise RuntimeError("not a form field")
-        return self.page.values.get(self.selector, "") == ""
-
-
 class _Page:
     """A field the page empties after the first `wipes` writes."""
 
@@ -60,8 +49,11 @@ class _Page:
         else:
             self.values[selector] = text
 
-    def locator(self, selector):
-        return _Locator(self, selector)
+    async def eval_on_selector(self, selector, expression, arg=None):
+        self.reads.append(expression)
+        if self.unreadable:
+            raise RuntimeError("no element matches the selector")
+        return self.values.get(selector, "") == ""
 
 
 class _Session:
@@ -130,10 +122,14 @@ def test_clearing_is_not_read_back_or_retried(quick):
     assert len(page.calls) == 1 and not page.reads
 
 
-def test_a_field_that_cannot_be_asked_is_not_retried(quick):
-    page = _Page(wipes=1, unreadable=True)
-    assert _type(page) == "typed into #c"
+def test_a_field_that_cannot_be_read_back_is_not_reported_as_kept(quick):
+    page = _Page(unreadable=True)
+    with pytest.raises(RuntimeError) as err:
+        _type(page, "hunter2")
     assert len(page.calls) == 1
+    assert "outcome is unknown" in str(err.value)
+    assert "nothing was written" not in str(err.value)
+    assert "hunter2" not in str(err.value)
 
 
 # --- against a real engine -------------------------------------------------
