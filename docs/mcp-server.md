@@ -149,8 +149,8 @@ between what the browser says it is and where it appears to be.
 |---|---|
 | `STEALTHFOX_PROXY` | Proxy URL, e.g. `http://user:pass@proxy.example.com:8080` or `socks5://proxy.example.com:1080`. Host and port are both required. Bring your own. With it set, the session's timezone, locale and egress are derived from the proxy. |
 | `STEALTHFOX_NO_PROXY` | `1` to go out from this machine's own address even when `STEALTHFOX_PROXY` is set. |
-| `STEALTHFOX_SEED` | Integer seed for a deterministic fingerprint (same seed, same identity). A profile's own seed wins over this one. |
-| `STEALTHFOX_PROFILE_DIR` | A directory for a persistent profile, so logins survive across runs. |
+| `STEALTHFOX_SEED` | Integer seed for a deterministic fingerprint (same seed, same identity), for `main`. A profile's own seed wins over this one. `support` is somebody else and draws its own. |
+| `STEALTHFOX_PROFILE_DIR` | A directory for a persistent profile for `main`, so logins survive across runs. `support` is not saved unless it is given a `profile` of its own. |
 | `STEALTHFOX_BINARY` | Path to an engine binary you already have. It must be the build the packaged seal pins, or startup refuses. |
 | `STEALTHFOX_HEADLESS` | `0` to run headed; headless by default. Decided by each launch: a saved session never records it, so a browser reopened by a headless server stays hidden even if it was last used headed. |
 | `STEALTHFOX_MCP_TRANSPORT` | `http` to serve over streamable HTTP instead of stdio. Default is stdio, which is what MCP clients expect. What else changes when you flip it, including the one thing that changes silently: [local or remote](local-vs-remote-mcp-server.md). |
@@ -285,7 +285,9 @@ roles rules out.
   back wearing different hardware. Ask for a seed that contradicts the one a
   profile carries and you get a refusal naming both numbers, never a silent
   choice. A relative path is resolved against the server's own directory, and
-  the answer reports the full path it used.
+  the answer reports the full path it used. A profile serves one Firefox at a
+  time, so one that the other browser or any other Firefox has open is refused
+  before anything is launched, naming who holds it.
 - **`proxy`** is where the traffic leaves, `http://user:pass@host:port` or
   `socks5://host:port`. Timezone, locale and geography follow it.
 - Pass `""` for `profile` or `proxy` to insist on **none**, even when the

@@ -9,11 +9,15 @@ the url down - so what is under test is the decisions, never the engine.
 """
 from __future__ import annotations
 
+import contextlib
+import os
+from pathlib import Path
+
 import pytest
 from invisible_playwright.async_api import TargetClosedError
 
 from invisible_playwright_mcp.mcp import GONE, NOT_OPEN, actions, server, store
-from invisible_playwright_mcp.mcp.work import REMEMBERED, Work
+from invisible_playwright_mcp.mcp.work import REMEMBERED, Work, profile_holder
 
 
 class _Recording:
@@ -372,24 +376,100 @@ async def test_a_profile_the_other_browser_holds_is_refused_by_name(work, tmp_pa
     with pytest.raises(ValueError) as refused:
         await server.browser_open(browser="support", profile=shared)
     said = str(refused.value)
-    assert "main already has the profile" in said and "proxy" not in said
+    assert "`main` already has the profile" in said and "proxy" not in said
     assert work.roles() == ["main"] and not main.closed
 
 
-async def test_a_failed_start_on_a_locked_profile_names_the_lock_not_a_proxy(
-        work, monkeypatch, tmp_path):
-    """The engine's own words were a sandbox line and "the pipe is closed"; the
-    answer used to add "pass proxy=\"\"" to a launch that had no proxy."""
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    (profile / "lock").symlink_to("127.0.1.1:+845767")
-    monkeypatch.setattr(work, "_factory", _NeverStarts)
+async def test_main_reopened_on_its_own_profile_is_not_a_conflict(work, tmp_path):
+    """The browser holding the profile is the one being replaced, and it is
+    closed first. Known-bad: asking the lock alone, which sees main's own
+    Firefox and refuses every reopen of a saved identity."""
+    shared = str(tmp_path / "profile")
+    await server.browser_open(profile=shared)
+    first = _session(work)
+    with held_profile(shared):
+        await server.browser_open(profile=shared)
+    assert first.closed and _session(work) is not first
 
-    with pytest.raises(RuntimeError) as told:
-        await server.browser_open(browser="support", profile=str(profile))
-    said = str(told.value)
-    assert "is locked (127.0.1.1:+845767)" in said
-    assert "proxy" not in said.split("\n", 1)[1]
+
+@contextlib.contextmanager
+def held_profile(directory, pid=None):
+    """Hold a profile directory the way a running Firefox holds it, on THIS
+    system: `parent.lock` open with no sharing on Windows, the `lock` symlink
+    naming a live process elsewhere. Neither needs a privilege."""
+    folder = Path(directory)
+    folder.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                         wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                         wintypes.HANDLE]
+        generic_rw, no_sharing, open_always = 0xC0000000, 0, 4
+        handle = kernel32.CreateFileW(str(folder / "parent.lock"), generic_rw, no_sharing,
+                                      None, open_always, 0x80, None)
+        assert handle not in (None, wintypes.HANDLE(-1).value), ctypes.get_last_error()
+        try:
+            yield
+        finally:
+            kernel32.CloseHandle(handle)
+    else:
+        link = folder / "lock"
+        link.symlink_to("127.0.0.1:+%d" % (pid or os.getpid()))
+        try:
+            yield
+        finally:
+            link.unlink()
+
+
+async def test_a_profile_another_firefox_holds_is_refused_before_the_launch(work, tmp_path):
+    """Measured on firefox-34: a second Firefox on a held profile did not
+    answer in sixty seconds. So nothing is launched, and the answer names the
+    lock rather than a proxy the launch did not have."""
+    profile = str(tmp_path / "profile")
+    with held_profile(profile):
+        with pytest.raises(ValueError) as refused:
+            await server.browser_open(browser="support", profile=profile)
+    said = str(refused.value)
+    assert "another Firefox" in said and "already has the profile" in said, said
+    assert "proxy" not in said
+    assert work.roles() == [], "something was launched on a held profile"
+
+
+def test_a_closed_profile_is_not_held(tmp_path):
+    """What every profile looks like once its Firefox has exited, on both
+    systems: Windows leaves `parent.lock`, Linux leaves `.parentlock`. Known-bad,
+    the first version: either file counted as a lock, so on Linux a closed
+    profile was called locked and the real cause was hidden behind it."""
+    (tmp_path / "parent.lock").write_bytes(b"")
+    (tmp_path / ".parentlock").write_bytes(b"")
+    assert profile_holder(str(tmp_path)) is None
+
+
+def test_a_held_profile_is_seen_on_this_system(tmp_path):
+    with held_profile(str(tmp_path)):
+        assert profile_holder(str(tmp_path))
+    assert profile_holder(str(tmp_path)) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stale symlink is how Linux records a "
+                    "crashed Firefox; Windows has no such record, its lock dies with the process")
+def test_a_lock_left_by_a_crashed_firefox_is_not_held(tmp_path):
+    dead = _a_process_that_is_gone()
+    (tmp_path / "lock").symlink_to("127.0.0.1:+%d" % dead)
+    assert profile_holder(str(tmp_path)) is None
+
+
+def _a_process_that_is_gone() -> int:
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
 
 
 async def test_a_failed_start_without_a_proxy_does_not_blame_one(work, monkeypatch):
