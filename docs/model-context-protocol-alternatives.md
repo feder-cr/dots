@@ -24,7 +24,7 @@ MCP server and are only choosing which one, the page you want is
 ## The price, measured
 
 Enumerated from our own browser server's tool registry on 2026-09-15 and counted
-with a tokenizer: **16 tools, 3,141 tokens** from 8,040 characters of
+with a tokenizer: **16 tools, 3,141 tokens** from 8,264 characters of
 description, sent again on every single turn of every session. A forty-turn session spends around 128,000 tokens restating what
 the tools are, before a page has been read.
 

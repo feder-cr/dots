@@ -41,6 +41,19 @@ class StealthSession:
         # The clock a frame's age is read from. An attribute so a test can move
         # time instead of sleeping through STALE_AFTER.
         self._clock = time.monotonic
+        # How many pauses before typing this browser has drawn, so two fields
+        # in one session do not get the same one.
+        self._typing_nonce = 0
+
+    @property
+    def seed(self):
+        """The seed this browser was launched with: the identity, and the hand
+        its typing rhythm is drawn from. None when it was launched without one."""
+        return self._kwargs.get("seed")
+
+    def next_typing_nonce(self) -> int:
+        self._typing_nonce += 1
+        return self._typing_nonce
 
     async def _attach(self, result) -> None:
         """`InvisiblePlaywright.__aenter__()` returns a Browser in ephemeral

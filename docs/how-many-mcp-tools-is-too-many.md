@@ -21,7 +21,7 @@ than a characters-per-token rule of thumb:
 | | |
 |---|---|
 | Tools exposed | **16** |
-| Description characters | 8,040 |
+| Description characters | 8,264 |
 | Tokens, descriptions alone | 1,848 |
 | Tokens, complete definitions resent every turn | **3,141** |
 | Median tokens per tool | 180 |
@@ -113,7 +113,7 @@ of four decisions is exactly this budget.
 
 ## Sources
 
-- This project's own MCP server, enumerated through its tool registry on 2026-09-15: 16 tools, 8,040 characters of description, 3,141 tokens for the complete definitions, median 178 tokens per tool. Tokens counted with `tiktoken` (`o200k_base`), not estimated from character count.
+- This project's own MCP server, enumerated through its tool registry on 2026-09-15: 16 tools, 8,264 characters of description, 3,141 tokens for the complete definitions, median 178 tokens per tool. Tokens counted with `tiktoken` (`o200k_base`), not estimated from character count.
 - [The Model Context Protocol documentation](https://modelcontextprotocol.io/docs/learn/server-concepts), retrieved 2026-09-11, for `tools/list` and the schema-defined shape of a tool.
 
 ---

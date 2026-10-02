@@ -32,13 +32,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from invisible_playwright.async_api import TargetClosedError
 
 from . import DEFAULT_BROWSER_ID, GONE, NOT_OPEN, SUPPORT_BROWSER_ID, identity, plan, store
 from ..quiet import swallow
+from .actions import NAVIGATION_TIMEOUT_MS
 from .session import StealthSession
 
 #: TWO browsers in one piece of work, with fixed roles, and the number is a
@@ -91,6 +94,24 @@ REMEMBERED = "the person this session already was"
 #: round trip. Past this, the answer is "its download is starting" and the
 #: caller asks again; nothing here waits for a transfer.
 ENGINE_SETTLE_SECONDS = 10.0
+
+#: The longest a typing call waits before it answers, finished or not; past
+#: it the typing goes on in the background (`Work.typing`). The bound
+#: `browser_navigate` gives a page to load, which is the longest any tool here
+#: already waited inside one call, so no call waits longer than it did before.
+ANSWER_WITHIN_S = NAVIGATION_TIMEOUT_MS / 1000
+
+
+@dataclass
+class _Typing:
+    """A typing in flight: the task, where, how much, since when, and whether
+    it has outlived the call that started it - the only case in which other
+    actions are refused rather than queued behind it."""
+    task: asyncio.Task
+    selector: str
+    total: int
+    started: float
+    outlived: bool = False
 
 
 def profile_holder(directory) -> Optional[str]:
@@ -203,12 +224,11 @@ class Work:
         #: talk to this server at the same time, and two opens of one role
         #: racing would leave a browser nobody holds a handle to.
         self._lock = asyncio.Lock()
-        #: One lock per browser around the commands that drive its input. A
-        #: page has one focus and one keyboard, so two browser_type calls at
-        #: once interleaved their keystrokes into one field
-        #: ("BBAAABABBABAB...", 2026-09-30) and could hang the engine. They
-        #: queue instead. Reads and the live pane's frames do not take it.
+        #: One lock per browser around the commands that drive its input; see
+        #: `acting`. Reads and the live pane's frames do not take it.
         self._input_locks: dict[str, asyncio.Lock] = {}
+        #: A typing still going on in the background, per browser; see `typing`.
+        self._typing: dict[str, _Typing] = {}
 
     # --- what is here -----------------------------------------------------------
 
@@ -445,6 +465,9 @@ class Work:
                 % (role, ", ".join(left) if left else "none"))
 
     async def _drop(self, role: str) -> None:
+        rec = self._typing.pop(role, None)
+        if rec is not None:
+            rec.task.cancel()
         session = self._open.pop(role, None)
         self._launched.pop(role, None)
         if session is not None:
@@ -493,11 +516,20 @@ class Work:
         return session
 
     async def acting(self, fn: Callable[..., Awaitable], *args,
-                     role: Optional[str] = None, exclusive: bool = False,
-                     **kwargs):
-        """Run one action on one open browser. The one funnel every tool that
-        touches a page goes through, so "what a browser has to be before a
-        tool may use it" is a fact known in one place.
+                     role: Optional[str] = None, **kwargs):
+        """Run one action that DRIVES a browser: its pointer, its keyboard, its
+        navigation. The one funnel every such tool goes through, so "what a
+        browser has to be before a tool may use it" is a fact known in one
+        place.
+
+        ⛔ ONE AT A TIME PER BROWSER, AND THAT IS THE DEFAULT RATHER THAN A
+        FLAG. A page has one focus and one keyboard: two `browser_type` calls
+        at once drove both into one field ("BBAAABABBABAB...", the other field
+        a single "A", measured 2026-09-30). So these queue behind the browser's
+        input lock. It used to be an `exclusive=True` every input tool had to
+        remember, so a tool that forgot it raced in silence; now a tool that
+        only READS says so by calling `reading`, and forgetting that costs a
+        wait instead of a corrupted field.
 
         A browser that closes UNDER the action - the window shut by hand, the
         engine crashed mid-call - surfaces as a closed target; that is the
@@ -506,11 +538,121 @@ class Work:
         Any other failure is the page's answer and passes through untouched.
         """
         at = role or DEFAULT_BROWSER_ID
-        if exclusive:
-            lock = self._input_locks.setdefault(at, asyncio.Lock())
+        await self._refuse_while_typing(at)
+        news = self._typing_news(at)
+        async with self._input_lock(at):
+            answer = await self._act(at, fn, *args, **kwargs)
+        return news + answer if news and isinstance(answer, str) else answer
+
+    async def reading(self, fn: Callable[..., Awaitable], *args,
+                      role: Optional[str] = None, **kwargs):
+        """Run one action that only READS a browser. It does not queue behind
+        input: a snapshot, a read or a frame of the live pane is answered while
+        a long text is still being typed, which is when somebody watching most
+        wants to see the page."""
+        return await self._act(role or DEFAULT_BROWSER_ID, fn, *args, **kwargs)
+
+    async def typing(self, fn: Callable[..., Awaitable], selector: str, text: str,
+                     role: Optional[str] = None) -> str:
+        """Type, through the input lock like any action, answering within
+        `ANSWER_WITHIN_S` whether or not the typing has finished.
+
+        ⛔ A PERSON TYPES TWO THOUSAND CHARACTERS IN ABOUT TEN MINUTES, AND A
+        CLIENT GIVES UP ON ONE CALL LONG BEFORE THAT. This session's hand types
+        at 250-380 ms a character (the persona's planned rhythm over twenty
+        seeds), so 2,000 characters take 8-13 minutes; measured on main, 252
+        characters were in after 90 s, and the client's 300 s cut the call off
+        with the field half full. No human rhythm finishes that inside one
+        call, and a faster one is a hand nobody has.
+
+        So typing that has not finished when the answer is due goes on in the
+        background, still holding the browser's input lock, and the answer says
+        so. Until it ends, every action on this browser is refused with how far
+        it has got rather than queued - a click left waiting ten minutes would
+        outlive its own call and then land on a page the caller has stopped
+        thinking about - and reads go on as usual. The outcome, kept or not, is
+        said by the first action after it.
+        """
+        at = role or DEFAULT_BROWSER_ID
+        await self._refuse_while_typing(at)
+        news = self._typing_news(at)
+        lock = self._input_lock(at)
+
+        async def run():
             async with lock:
-                return await self._act(at, fn, *args, **kwargs)
-        return await self._act(at, fn, *args, **kwargs)
+                return await self._act(at, fn, selector, text)
+
+        task = asyncio.create_task(run())
+        rec = _Typing(task, selector, len(text), time.monotonic())
+        try:
+            done, _ = await asyncio.wait({task}, timeout=ANSWER_WITHIN_S)
+        except asyncio.CancelledError:
+            # The client gave up on the call; the typing it started has not,
+            # and the next action must see it and say how it ended.
+            rec.outlived = True
+            self._typing[at] = rec
+            raise
+        if task in done:
+            return news + task.result()
+        rec.outlived = True
+        self._typing[at] = rec
+        return news + (
+            "still typing into %s: %d characters at this browser's typing pace "
+            "take longer than one answer may wait, so the typing goes on after "
+            "this answer. Until it is done, actions on the %s browser are "
+            "refused with how far it has got; reads work as usual, and "
+            "browser_status says when it has finished." % (selector, len(text), at))
+
+    def _input_lock(self, at: str) -> asyncio.Lock:
+        return self._input_locks.setdefault(at, asyncio.Lock())
+
+    async def _refuse_while_typing(self, at: str) -> None:
+        """Raise, saying how far it has got, while a typing goes on in `at`."""
+        rec = self._typing.get(at)
+        if rec is None or not rec.outlived or rec.task.done():
+            return
+        raise RuntimeError("the %s browser is still typing %s. Reads work "
+                           "meanwhile; ask for this again when it is done."
+                           % (at, await self._typing_progress(at, rec)))
+
+    async def _typing_progress(self, at: str, rec: "_Typing") -> str:
+        """`into #x: 812 of 2000 characters so far, about 7 minutes to go`."""
+        said = "into %s" % rec.selector
+        with swallow("how far it got is a courtesy; the refusal stands without it"):
+            held = await self.session(at).page().locator(rec.selector).first.input_value(
+                timeout=1_000)
+            spent = time.monotonic() - rec.started
+            said += ": %d of %d characters so far" % (len(held), rec.total)
+            if held and spent > 0:
+                left = (rec.total - len(held)) * spent / len(held)
+                said += ", about %d minutes to go" % max(1, round(left / 60))
+        return said
+
+    def typing_status(self, at: str) -> str:
+        """What `browser_status` adds about typing in the background: that it
+        goes on, or how it ended. Empty when there is nothing to say."""
+        rec = self._typing.get(at)
+        if rec is None:
+            return ""
+        if not rec.task.done():
+            return " typing: still going on in the background, into %s." % rec.selector
+        return " " + self._typing_news(at).strip()
+
+    def _typing_news(self, at: str) -> str:
+        """How a typing that went on in the background ended, said once, by the
+        first action after it; empty when there is none to tell."""
+        rec = self._typing.get(at)
+        if rec is None or not rec.task.done():
+            return ""
+        del self._typing[at]
+        if rec.task.cancelled():
+            return ""
+        failed = rec.task.exception()
+        if failed is not None:
+            return "(the typing into %s that went on in the background stopped: %s)\n" % (
+                rec.selector, " ".join(str(failed).split()))
+        return "(the typing that went on in the background has finished: %s)\n" % (
+            rec.task.result())
 
     async def _act(self, at: str, fn, *args, **kwargs):
         # The browser is looked up after any queue, so one closed while a
@@ -612,7 +754,8 @@ class Work:
         except Exception:
             # Any other failure is the page being difficult, not the browser
             # being gone: the identity is still worth reporting.
-            return plan.describe(launched) + " page: the page is unreadable."
+            return (plan.describe(launched) + " page: the page is unreadable."
+                    + self.typing_status(role))
         here = next((r for r in rows if r["active"]), rows[0] if rows else None)
         where = (here["url"] or "blank") if here else "no page open yet"
         # ⛔ COUNTED, AND NOT BLAMED ON ANYBODY. A caller cannot make, choose
@@ -621,4 +764,4 @@ class Work:
         # project removed from `navigate`.
         if len(rows) > 1:
             where += " (%d other pages are open in this browser)" % (len(rows) - 1)
-        return plan.describe(launched) + " page: %s." % where
+        return plan.describe(launched) + " page: %s." % where + self.typing_status(role)

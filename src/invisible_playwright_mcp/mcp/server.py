@@ -441,7 +441,7 @@ async def browser_navigate(url: str, wait_until: str = "domcontentloaded",
     or "networkidle" for a single-page app that fetches its content after
     load."""
     return await work.acting(actions.navigate, url, wait_until=wait_until,
-                             role=browser, exclusive=True)
+                             role=browser)
 
 
 @mcp.tool(annotations=_says("Read the page text", read_only=True))
@@ -471,7 +471,7 @@ async def browser_read_text(selector: str = "body",
     # written twice gets a GATE, not a deletion: `test_the_cap_in_the_prose_is
     # _the_cap_the_tool_uses` ties this digit to the constant, so the copy
     # cannot drift even though it stays.
-    return await work.acting(actions.read_text, selector, max_chars, role=browser)
+    return await work.reading(actions.read_text, selector, max_chars, role=browser)
 
 
 @mcp.tool(annotations=_says("Snapshot the page", read_only=True))
@@ -503,7 +503,7 @@ async def browser_snapshot(max_chars: int = 0, browser: Browser = None) -> str:
     # once and updated once, and the copy that stays wrong is the one a model
     # reads. It also spends the 1024 characters this description is cut at on
     # evidence for a reader who is not there.
-    return await work.acting(actions.snapshot, max_chars, role=browser)
+    return await work.reading(actions.snapshot, max_chars, role=browser)
 
 
 @mcp.tool(annotations=_says("Read the page HTML", read_only=True))
@@ -523,13 +523,13 @@ async def browser_read_html(mode: str = "form", browser: Browser = None) -> str:
     middle leaves tags that mean nothing, so it is not cut - but the answer can
     be long. Reach for browser_snapshot when you only need something to click.
     """
-    return await work.acting(actions.read_html, mode, role=browser)
+    return await work.reading(actions.read_html, mode, role=browser)
 
 
 @mcp.tool(annotations=_says("Take a screenshot", read_only=True))
 async def browser_take_screenshot(browser: Browser = None) -> Image:
     """One screenshot of this browser's page, on demand."""
-    png = await work.acting(actions.screenshot_png, role=browser)
+    png = await work.reading(actions.screenshot_png, role=browser)
     return Image(data=png, format="png")
 
 
@@ -549,7 +549,7 @@ async def browser_watch(browser: Browser = None) -> Image:
     # is not a schema pydantic will build - measured, five test modules
     # refuse to import. A refusal reaches a client as an error result
     # carrying the reason, which every client already handles.
-    jpeg = await work.acting(lambda session: session.watch_frame(), role=browser)
+    jpeg = await work.reading(lambda session: session.watch_frame(), role=browser)
     return Image(data=jpeg, format="jpeg")
 
 
@@ -562,7 +562,7 @@ async def browser_click(selector: str, browser: Browser = None) -> str:
     Scrolls it into view and waits for it to be clickable. When no selector can
     describe the target, use browser_click_at with coordinates from
     browser_snapshot."""
-    return await work.acting(actions.click, selector, role=browser, exclusive=True)
+    return await work.acting(actions.click, selector, role=browser)
 
 
 @mcp.tool(annotations=_says("Click at a point", destructive=True))
@@ -585,22 +585,20 @@ async def browser_click_at(x: float, y: float, hold_seconds: float = 0.0,
     # happened, on the one tool that exists for sliders and press-and-hold
     # challenges. The floor in pyproject.toml is set accordingly. Said here and
     # not in the description above, which the API cuts at 1024 characters.
-    png = await work.acting(actions.click_at, x, y, hold_seconds, role=browser, exclusive=True)
+    png = await work.acting(actions.click_at, x, y, hold_seconds, role=browser)
     return Image(data=png, format="png")
 
 
 @mcp.tool(annotations=_says("Type into a field", destructive=True))
 async def browser_type(selector: str, text: str, browser: Browser = None) -> str:
-    """Fill a field, replacing whatever it holds.
+    """Type into a field, replacing what it holds, key by key at a human pace.
 
-    Up to 80 characters are typed key by key at a human pace (about 0.4 s a
-    character). Longer text goes in at once, as a paste does: no key events,
-    one trusted input event, and the field's maxlength applies. The field is
-    read back once the page has answered; text the page dropped while it
-    arrived is typed again. Calls that act on the same browser run one at a
-    time, in order."""
-    return await work.acting(actions.type_text, selector, text, role=browser,
-                             exclusive=True)
+    The answer says what the field kept: all of it, a maxlength's cut, the
+    page's reformatting, nothing (the page took it out), or one box of a code
+    the page spreads over several. Nothing is retyped on its own. Text too long
+    to finish within one answer goes on in the background; until it ends,
+    actions on that browser are refused with its progress, and reads work."""
+    return await work.typing(actions.type_text, selector, text, role=browser)
 
 
 @mcp.tool(annotations=_says("Choose a dropdown option", destructive=True))
@@ -613,14 +611,14 @@ async def browser_select_option(selector: str, value: str,
     plus arrows cannot tell you which row it landed on, and setting the value
     through browser_evaluate changes it without the page seeing a real
     interaction."""
-    return await work.acting(actions.select_option, selector, value, role=browser, exclusive=True)
+    return await work.acting(actions.select_option, selector, value, role=browser)
 
 
 @mcp.tool(annotations=_says("Press a key", destructive=True))
 async def browser_press_key(key: str, browser: Browser = None) -> str:
     """Press a key on whatever has focus: "Enter", "Tab", "Escape",
     "ArrowDown", "Control+a", or a single character."""
-    return await work.acting(actions.press_key, key, role=browser, exclusive=True)
+    return await work.acting(actions.press_key, key, role=browser)
 
 
 @mcp.tool(annotations=_says("Read the page with JavaScript", read_only=True))
@@ -641,7 +639,7 @@ async def browser_evaluate(expression: str, browser: Browser = None) -> str:
     The refusal catches the obvious spellings, not every possible one. A script
     that slips past it is still the wrong way to do the thing: report it in your
     answer rather than using it."""
-    return await work.acting(actions.evaluate, expression, role=browser)
+    return await work.reading(actions.evaluate, expression, role=browser)
 
 
 def main() -> None:

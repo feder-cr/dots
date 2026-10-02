@@ -19,9 +19,16 @@ from invisible_playwright_mcp.mcp import server
 #: `work.open`, `work.close`, `work.listing`, `work.status`.
 NOT_DRIVING_A_PAGE = {"browser_open", "browser_close", "browser_list", "browser_status"}
 
+#: The doors to a page. All three end in the same `Work._act`, which is where
+#: "what a browser has to be before a tool may use it" is known: `acting` for
+#: what drives the page and queues behind its input, `reading` for what only
+#: reads it and does not queue, `typing` for the one action that may outlast
+#: its call.
+FUNNEL = {"acting", "reading", "typing"}
+
 #: What a tool may reach on `work`. Everything that drives a page goes through
-#: `acting`; nothing reaches the sessions or the dicts behind it.
-ALLOWED = {"acting", "open", "close", "listing", "status"}
+#: the funnel; nothing reaches the sessions or the dicts behind it.
+ALLOWED = FUNNEL | {"open", "close", "listing", "status"}
 
 
 def _tools():
@@ -46,7 +53,7 @@ def _acting_calls(node):
     for inner in ast.walk(node):
         if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
                 and isinstance(inner.func.value, ast.Name)
-                and inner.func.value.id == "work" and inner.func.attr == "acting"):
+                and inner.func.value.id == "work" and inner.func.attr in FUNNEL):
             yield inner
 
 
@@ -59,7 +66,7 @@ def test_every_tool_that_drives_a_page_goes_through_the_funnel_and_names_its_bro
             continue
         calls = list(_acting_calls(tool))
         assert len(calls) == 1, (
-            "%s drives a page through %d `work.acting` calls; the funnel is one"
+            "%s drives a page through %d calls into the funnel; it is one"
             % (tool.name, len(calls)))
         given = {k.arg: k.value for k in calls[0].keywords}
         assert isinstance(given.get("role"), ast.Name) and given["role"].id == "browser", (
@@ -73,7 +80,7 @@ def test_no_tool_reaches_past_the_funnel():
     for tool in _tools():
         for attr, _ in _reaches(tool):
             assert attr in ALLOWED, (
-                "%s reaches `work.%s`, which is not one of the five doors" % (tool.name, attr))
+                "%s reaches `work.%s`, which is not one of the doors" % (tool.name, attr))
 
 
 def test_the_tools_that_act_on_the_piece_of_work_name_a_browser_too():

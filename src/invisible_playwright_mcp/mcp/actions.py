@@ -87,6 +87,11 @@ def capped_elements(head: dict, elements: list, limit: int = DEFAULT_MAX_CHARS) 
 
 # --- reading ---------------------------------------------------------------
 
+#: How long `browser_navigate` gives a page to answer: the longest any tool here
+#: waits inside one call, and so also the bound `Work.typing` answers within.
+NAVIGATION_TIMEOUT_MS = 45_000
+
+
 async def navigate(session, url: str, wait_until: str = "domcontentloaded") -> str:
     """Go to a url, and say what came back.
 
@@ -112,7 +117,7 @@ async def navigate(session, url: str, wait_until: str = "domcontentloaded") -> s
     if not session.pages():
         await session.new_page()
     page = session.page()
-    response = await page.goto(url, wait_until=wait_until, timeout=45_000)
+    response = await page.goto(url, wait_until=wait_until, timeout=NAVIGATION_TIMEOUT_MS)
     if response is None:
         # A same-document navigation (an anchor, or the same url again) creates
         # no document and so has no response. Playwright answers None here and
@@ -632,6 +637,13 @@ def _explain(exc, what: str, why: dict) -> RuntimeError:
         % (exc, what, json.dumps(why), next_move(why)))
 
 
+#: How long an action aimed at a selector waits for its element to be there and
+#: usable, for every tool that takes one. One number, because a click that
+#: waited longer than a type on the same element would be a difference nobody
+#: chose.
+ACTION_TIMEOUT_MS = 15_000
+
+
 async def _on_selector(session, selector: str, what: str, act):
     """Run an action aimed at a selector, and when it fails say why and what
     follows from it.
@@ -670,7 +682,7 @@ async def click(session, selector: str) -> str:
     """Click an element, and say what stopped it when nothing happens."""
     return await _on_selector(
         session, selector, "click",
-        lambda: session.page().click(selector, timeout=15_000)) or f"clicked {selector}"
+        lambda: session.page().click(selector, timeout=ACTION_TIMEOUT_MS)) or f"clicked {selector}"
 
 
 async def click_at(session, x: float, y: float, hold_seconds: float = 0.0) -> bytes:
@@ -695,140 +707,159 @@ async def click_at(session, x: float, y: float, hold_seconds: float = 0.0) -> by
     return await page.screenshot()
 
 
-#: The longest text typed key by key. The engine types at the session's
-#: human rhythm, measured at about 385 ms a character, so 1,330 characters
-#: took over eight minutes and the call was cut off at the MCP timeout with
-#: 890 still to go (2026-09-30). 80 characters is about half a minute at that
-#: rate. Anything longer goes in the way a paste does: see _put.
-KEYSTROKE_LIMIT = 80
+#: What the page is asked about a field, before typing and after: what it holds,
+#: whether it still has the focus, and whether it is a secret. One read, so the
+#: three answers describe the same moment. `value` is None for anything that is
+#: neither a text control nor editable content, which then cannot be read back.
+#:
+#: The focus is asked of the element's own root, because a document answers
+#: with the shadow HOST for anything inside a shadow root.
+FIELD_STATE_JS = """(el) => {""" + clean.SECRET_FIELD_JS + """
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const text = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+    return {value: text ? el.value : (el.isContentEditable ? el.innerText : null),
+            focused: root.activeElement === el,
+            secret: secretField(el)};
+}"""
 
 
-#: How long a typed value has to stay in its field before browser_type says it
-#: is there, and how long after the call began it keeps looking. A field that a
-#: page's own model writes back into answers its focus or the previous field's
-#: commit some time later, and that answer overwrites what was typed: measured
-#: on a real quote form (Angular, an NgRx store whose every emission
-#: writes the stored answer into the input), "30" was gone a second after it
-#: was typed, and "someone@example.com" typed after the date of birth kept only
-#: "eone@example.com" (2026-10-01). The call returned "typed into" both times.
-SETTLE_S = 0.75
-SINCE_FOCUS_S = 2.0
-#: Typing again is what a person does when a field drops what they typed, and
-#: by then the page has answered the focus, so a second try lands. A third
-#: covers a commit that answers late; past that the page is keeping the field
-#: the way it is on purpose and the caller is told so.
-TYPE_ATTEMPTS = 3
+async def _field_state(page, selector: str) -> dict:
+    return await page.locator(selector).first.evaluate(FIELD_STATE_JS)
 
 
-def _letters(text: str) -> str:
-    """What a page's formatter leaves alone: a date typed as 01/02/2000 may
-    show as 01/02/2000 or 01022000, a phone as 425-555-0100, a name with its
-    first letter raised. Comparing these is what says whether the text is in
-    the field, whatever the field dressed it in."""
-    return "".join(ch for ch in text if ch.isalnum()).casefold()
+def _pause_before_typing(session) -> float:
+    """How long this session's typist stops between reaching a field and the
+    first key, in seconds, or 0 when the session has no typing rhythm at all.
 
+    ⛔ A PERSON DOES NOT TYPE THE INSTANT A FIELD HAS THE FOCUS, AND THE PAGE
+    COUNTS ON IT. The engine's `fill` focuses and presses the first key in the
+    same breath, a few milliseconds apart, which no hand does - and a page that
+    answers the focus a moment later (a store writing its stored answer back,
+    a formatter, a field that loads its suggestions) then writes over what is
+    already arriving. Measured on a real form: "30" gone a second after it was
+    typed, an email keeping only its last letters.
 
-def _dropped(value: str, text: str) -> bool:
-    """True when the field lost the START of what was typed, or all of it.
-
-    That is the mark of a page writing its stored answer back while keys were
-    still arriving: the field is emptied and the keys after it land. Text the
-    field truncated (maxlength) keeps the start instead, and a field that
-    reformatted the text keeps every letter, so neither is retyped. A value
-    that is both the start and the end of the text ("zz" of "zzzz") is read as
-    the truncation, which retyping cannot change.
+    Drawn from the session's own typing persona, the same seeded hand the
+    engine types with, as one of its hesitations - "how long the typist stops
+    to think" is what this pause is - so it varies per field and per session
+    and is no constant every install shares. `None` for a seed means
+    humanising is off, and that keeps meaning no rhythm, not a default one.
     """
-    v, t = _letters(value), _letters(text)
-    return bool(t) and v != t and (not v or (t.endswith(v) and not t.startswith(v)))
+    seed = session.seed
+    if seed is None:
+        return 0.0
+    # ⛔ THE PERSONA IS THE WRAPPER'S, AND SO IS ITS SPREAD. 0.55 is the sigma
+    # its `plan_typing` gives every hesitation; it is not exposed as a field,
+    # so it is written here once more until the wrapper owns this pause too.
+    from invisible_playwright._behaviour import TypingPersona, _log_normal, _rng
+
+    persona = TypingPersona.from_seed(seed)
+    draw = _rng(seed, "mcp:before-typing", session.next_typing_nonce())
+    return _log_normal(draw, persona.hesitation_median_ms, 0.55) / 1000.0
 
 
-async def _read_field(page, selector: str):
-    """The field's value, or None when the target is not a form field."""
-    try:
-        return await page.locator(selector).input_value(timeout=5_000)
-    except Exception:
-        return None
+async def _settle_after_focus(session, selector: str, held: str) -> None:
+    """Wait the typist's pause, and longer while the field visibly changes.
 
-
-async def _settled(page, selector: str, text: str, began: float):
-    """The field's value once the page has stopped answering: read until it
-    has held SETTLE_S after the keys and SINCE_FOCUS_S after the call began,
-    and returned early the moment it shows the text was dropped."""
-    loop_end = max(time.monotonic() + SETTLE_S, began + SINCE_FOCUS_S)
-    value = await _read_field(page, selector)
-    while value is not None and not _dropped(value, text) and time.monotonic() < loop_end:
-        await asyncio.sleep(0.1)
-        value = await _read_field(page, selector)
-    return value
-
-
-async def _is_password(page, selector: str) -> bool:
-    with swallow("a field that cannot be asked is not shown either way"):
-        return (await page.locator(selector).get_attribute("type", timeout=2_000) or "").lower() == "password"
-    return True
-
-
-async def _put(page, selector: str, text: str) -> None:
-    """Up to KEYSTROKE_LIMIT characters are typed key by key. Longer text goes
-    in the way a paste does: fill clears the field (trusted input and change
-    events, no keys) and the keyboard's insert_text puts the rest in as one
-    trusted beforeinput/input pair, under the field's own maxlength."""
-    if len(text) <= KEYSTROKE_LIMIT:
-        await page.fill(selector, text, timeout=15_000)
-    else:
-        await page.fill(selector, "", timeout=15_000)
-        await page.keyboard.insert_text(text)
-
-
-async def _type_and_keep(session, selector: str, text: str) -> str:
-    """Type the text, and say "typed into" only once the field has kept it.
-
-    "Typed" is a claim about the field, not about the call. The value is read
-    back after the page has had time to answer, and text the page dropped while
-    it was arriving is typed again, as a person would.
+    The pause starts again from every change the field shows, so a page that
+    is still answering the focus finishes before the first key. Read through
+    `input_value`, which the page cannot observe, and bounded by the action
+    timeout, because a field that never stops changing must not hold the call
+    forever. What the page does not SHOW - a timer about to fire - cannot be
+    waited for by anybody; what that costs is said after typing, not guessed.
     """
+    pause = _pause_before_typing(session)
+    if pause <= 0:
+        return
     page = session.page()
-    began = time.monotonic()
-    # Asked before typing as well as after: a page can turn a password box
-    # into a text box once it holds a value (a "show password" toggle), and
-    # the reply must not then print what was typed into it.
-    secret = await _is_password(page, selector)
-    value, before, tries = None, None, 0
-    for tries in range(1, TYPE_ATTEMPTS + 1):
-        await _put(page, selector, text)
-        value = await _settled(page, selector, text, began)
-        if value is None:
-            return (f"typed into {selector}; not read back, because it is not "
-                    "a form field")
-        if not _dropped(value, text) or value == before:
-            break
-        before = value
-    again = "" if tries == 1 else f" (the page cleared it while it was typed; typed {tries} times)"
-    if value == text or _letters(value) == _letters(text):
-        if len(text) > KEYSTROKE_LIMIT:
-            return f"typed into {selector} ({len(text)} characters, inserted at once){again}"
-        return f"typed into {selector}{again}"
-    if _dropped(value, text):
-        raise RuntimeError(
-            f"{selector} did not keep what was typed: typed {tries} times, it "
-            f"holds {len(value)} of {len(text)} characters each time, the start "
-            "lost. The page rewrites this field from its own model while keys "
-            "arrive. Click the field, wait a second, and use browser_press_key, "
-            "then read the field.")
+    clock = time.monotonic
+    started = still_since = clock()
+    while clock() - still_since < pause and clock() - started < ACTION_TIMEOUT_MS / 1000:
+        await asyncio.sleep(pause / 8)
+        with swallow("a field that cannot be read is waited for, not watched"):
+            now = await page.locator(selector).first.input_value(timeout=ACTION_TIMEOUT_MS)
+            if now != held:
+                held, still_since = now, clock()
+
+
+def _shown(value: str, secret: bool) -> str:
+    if secret:
+        return "%d characters, not shown because the field holds a secret" % len(value)
+    return repr(value if len(value) <= 120 else value[:117] + "...")
+
+
+def what_the_field_kept(selector: str, text: str, before: dict, after: dict) -> str:
+    """The sentence `browser_type` answers, from what the field holds now.
+
+    ⛔ "TYPED INTO" IS A CLAIM ABOUT THE FIELD, NOT ABOUT THE CALL, and every
+    other outcome is SAID rather than retried. Typing again is not idempotent:
+    a field that turns `a@b.io,` into a chip took the text the first time, and
+    a second pass makes a second chip. Nor is every short value a failure: a
+    one-time code split across six boxes keeps one digit here because the page
+    moved the focus on, which is the page working. So each shape is named for
+    what it is, and the caller decides what follows.
+    """
+    value = after.get("value")
+    secret = bool(before.get("secret") or after.get("secret"))
+    if value is None:
+        return "typed into %s; it is not a field whose text can be read back" % selector
+    if value == text:
+        moved = "" if after.get("focused") else "; then the page moved the focus on"
+        return "typed into %s%s" % (selector, moved)
+    if not after.get("focused") and text.startswith(value):
+        if not value:
+            return ("typed toward %s, but the page moved the focus away before any "
+                    "of it stayed there; the keys went where the focus went. Read "
+                    "the page to see where." % selector)
+        return ("typed into %s until the page moved the focus to another field after "
+                "%d of %d characters, as a code split across boxes does: %s holds "
+                "%s and the rest went where the focus went. Read the page to check."
+                % (selector, len(value), len(text), selector, _shown(value, secret)))
     if value and text.startswith(value):
-        raise RuntimeError(
-            f"{selector} kept the first {len(value)} of {len(text)} characters "
-            "and took no more, which is what a maxlength does. Shorten the text "
-            "and type it again.")
-    if secret or await _is_password(page, selector):
-        return f"typed into {selector}; the page changed it to {len(value)} characters"
-    shown = value if len(value) <= 120 else value[:117] + "..."
-    return f"typed into {selector}; the page shows it as {shown!r}"
+        return ("%s kept only the first %d of %d characters and refused the rest, "
+                "as a maxlength does; the rest went nowhere. Shorten the text if "
+                "the field cannot take more." % (selector, len(value), len(text)))
+    caution = ("Read the page before typing again: a field that turns text into "
+               "items would take it twice.")
+    if not value:
+        return ("%s is empty after typing: the page took the text out of the field. "
+                "A tag or chip field does that when a comma or Enter turns it into an "
+                "item, and a page that rewrites the field from its own state does it "
+                "while it answers the focus. %s" % (selector, caution))
+    if text.endswith(value):
+        return ("%s holds only the last %d of %d characters: the page emptied the "
+                "field while it was being typed, as a page that rewrites a field "
+                "from its own state does when it answers the focus or another "
+                "field's change. %s" % (selector, len(value), len(text), caution))
+    return "typed into %s; the page shows it as %s" % (selector, _shown(value, secret))
 
 
 async def type_text(session, selector: str, text: str) -> str:
-    return await _on_selector(session, selector, "typing",
-                              lambda: _type_and_keep(session, selector, text))
+    """Type into a field the way a person does, and say what the field kept.
+
+    Focus, the typist's pause (longer while the page is still answering the
+    focus), then every character through the keyboard at the session's rhythm,
+    replacing what the field held, and a read of the field afterwards.
+
+    ⛔ EVERY CHARACTER IS A KEY, HOWEVER LONG THE TEXT. Text past eighty
+    characters used to go in through `insert_text`, described as a paste, and
+    a page saw something no person produces: a composition with no key behind
+    it, the whole text committed at once, after a clear that was an untrusted
+    bare `input`. A real paste is Control, V, a `paste` event carrying the
+    data and an `insertFromPaste` input, and the engine cannot produce one
+    without writing to the clipboard - which in a headed browser on Windows is
+    the person's own clipboard. Until it can, long text is typed; the call that
+    would outlast a client's patience goes on in the background
+    (`Work.typing`), so typing it still finishes.
+    """
+    page = session.page()
+    await _on_selector(session, selector, "typing",
+                       lambda: page.focus(selector, timeout=ACTION_TIMEOUT_MS))
+    before = await _field_state(page, selector)
+    await _settle_after_focus(session, selector, before.get("value"))
+    await _on_selector(session, selector, "typing",
+                       lambda: page.fill(selector, text, timeout=ACTION_TIMEOUT_MS))
+    return what_the_field_kept(selector, text, before, await _field_state(page, selector))
 
 
 async def select_option(session, selector: str, value: str) -> str:
@@ -862,7 +893,7 @@ async def select_option(session, selector: str, value: str) -> str:
 
     async def choose():
         try:
-            return await page.select_option(selector, value=value, timeout=15_000)
+            return await page.select_option(selector, value=value, timeout=ACTION_TIMEOUT_MS)
         except Exception as exc:
             # ⛔ THE SELECT WAS FOUND AND HAS NO SUCH OPTION, which the driver
             # says as `error:optionsnotfound` and the diagnosis below cannot
