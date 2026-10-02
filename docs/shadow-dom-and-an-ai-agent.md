@@ -13,13 +13,13 @@ reachable at all, and Playwright's own documentation says closed-mode shadow
 roots are not supported.
 
 Measured here on 2026-09-17, one page with both kinds, served from
-`127.0.0.1`:
+`127.0.0.1`, and the snapshot row again on 2026-10-02, once it walked open roots:
 
 | | open shadow root | closed shadow root |
 |---|---|---|
 | `browser_read_text` | not present | not present |
 | `browser_read_html` | not present | not present |
-| `browser_snapshot` | not listed | not listed |
+| `browser_snapshot` | **listed, as `#host >> #inner`** | not listed |
 | `browser_evaluate` via `shadowRoot` | **returns the text** | `null` |
 | **`browser_click` by selector** | **`clicked #ob`** | **`clicked #cb`** |
 
@@ -31,10 +31,12 @@ cross.**
 
 ## So the shape is: act yes, read no
 
-Three of the four reads see neither kind. Standard JavaScript sees the open one
-and is refused the closed one, exactly as the specification requires. But the
-engine's own element resolution reaches both, because it is not doing it from
-page script.
+The two text reads see neither kind. The snapshot lists the controls inside an
+open root, each with a selector that names its host and then the control
+(`#host >> #inner`, Playwright's own chaining), and lists nothing inside a closed
+one. Standard JavaScript sees the open one and is refused the closed one, exactly
+as the specification requires. But the engine's own element resolution reaches
+both, because it is not doing it from page script.
 
 That asymmetry is the whole practical content of this page:
 
@@ -50,9 +52,10 @@ component, which the component's own handler wrote into.
 
 ## How to write a task against a component you cannot read
 
-**Find the selector once, by hand.** Open the page in a browser, inspect the
-component, and put the selector in the task. The agent cannot discover it,
-because the snapshot does not list what is inside the root.
+**For a closed root, find the selector once, by hand.** Open the page in a
+browser, inspect the component, and put the selector in the task. The agent
+cannot discover it, because the snapshot does not list what is inside a closed
+root. Inside an open one it can: the snapshot hands out the selector.
 
 **Name what should change afterwards, in the light DOM.** "Click the confirm
 control in the date picker, then check that the summary line shows a date." The
@@ -106,16 +109,17 @@ shadow root, and both have their page here.
 measured, a click by selector into a closed shadow root landed and the
 component's handler fired.
 
-**Can it read inside a shadow root?** Not through the page reads or the snapshot,
-for either kind. Standard JavaScript can read an open one and gets `null` for a
-closed one.
+**Can it read inside a shadow root?** Not through the text reads, for either
+kind. The snapshot lists the controls inside an open root and nothing inside a
+closed one. Standard JavaScript can read an open one and gets `null` for a closed
+one.
 
 **How do I verify the click worked?** By something outside the shadow boundary: a
 change in the visible page, a URL, a summary line. Name it in the task.
 
-**Why can't the agent find the element?** Because the snapshot lists what it can
-enumerate in the document, and shadow contents are not in it. Supply the selector
-yourself.
+**Why can't the agent find the element?** If it is inside a closed shadow root,
+because the snapshot lists what page script can enumerate, and a closed root is
+closed to that. Supply the selector yourself.
 
 **What if there is no usable selector?** Screenshot and click by position. That
 is the third rung and it exists for exactly this.
@@ -130,6 +134,7 @@ clicking, not less.
 ## Sources
 
 - Measured 2026-09-17 through this project's MCP server over stdio, on a page carrying one open and one closed shadow root, each containing a paragraph and a button, served from `127.0.0.1`. `browser_click` returned `clicked #ob` and `clicked #cb`; a light-DOM log element read back `open clicked` and then `closed clicked`. `browser_evaluate` on the open host's `shadowRoot.textContent` returned the component's text; on the closed host `shadowRoot` was `null`.
+- Measured 2026-10-02 on firefox-34, on a page whose fields live in open roots, one of them two components deep, beside a closed one: `browser_snapshot` listed `#firstName >> #input` and `#card >> #inner >> #input`, `browser_type` and `browser_click` worked through both, and nothing inside the closed root was listed. A `<select>` inside an open root is listed but cannot be set on that engine yet: its input command refuses a node in a shadow tree.
 - [Playwright's own documentation](https://playwright.dev/docs/locators) states that closed-mode shadow roots are not supported, which is the baseline the measurement above is interesting against.
 
 ---
