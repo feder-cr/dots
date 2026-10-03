@@ -126,6 +126,32 @@ async def test_a_same_document_navigation_says_so_instead_of_breaking():
     assert "https://example.com/#section" in reply, reply
 
 
+async def test_no_response_while_still_on_ANOTHER_page_is_an_error_not_success():
+    """⛔ Measured 2026-10-03: leaving a single-page login app with
+    `networkidle`, goto answered None before the new document had been
+    requested, and the reply was "navigated to <the old url> (no HTTP
+    response: same-document navigation)" - success, while still on the page
+    being left. None with the
+    page somewhere other than where it was asked to go is not a same-document
+    navigation, and must not read like any kind of arrival."""
+    page = _Page(None, landed="https://bank.example/account/login/")
+    with pytest.raises(RuntimeError) as e:
+        await actions.navigate(_Session(page), "https://other.example/login")
+    message = str(e.value)
+    assert "did not complete" in message, message
+    assert "https://other.example/login" in message
+    assert "still at https://bank.example/account/login/" in message
+    assert not message.startswith("navigated to"), message
+
+
+async def test_the_same_url_again_is_still_a_same_document_answer():
+    """The other legitimate None: asking for the page already shown, fragment
+    aside. It must keep its honest answer rather than become an error."""
+    page = _Page(None, landed="https://example.com/a#one")
+    reply = await actions.navigate(_Session(page), "https://example.com/a#two")
+    assert "same-document" in reply, reply
+
+
 async def test_it_still_opens_a_tab_when_there_is_none():
     """The behaviour that was already there, kept: this function is also the
     only path the built-in chat uses, so losing it would strand a fresh

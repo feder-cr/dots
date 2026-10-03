@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import tempfile
+import urllib.parse
 from typing import Any
 
 from invisible_playwright import hesitation
@@ -127,6 +128,21 @@ async def navigate(session, url: str, wait_until: str = "domcontentloaded") -> s
         # A same-document navigation (an anchor, or the same url again) creates
         # no document and so has no response. Playwright answers None here and
         # so do we: naming the reason keeps it from reading as a failure.
+        #
+        # ⛔ BUT None IS ONLY THAT WHEN THE PAGE IS WHERE WE ASKED. On
+        # 2026-10-03 a `networkidle` goto away from a single-page login app
+        # returned before the new document had even been requested (an engine
+        # wait satisfied by the OLD page's silence, invisible_playwright#280),
+        # and this line answered "navigated to <the old url> (no HTTP
+        # response: same-document navigation)": success, naming the page it
+        # had NOT left. Same-document means the same document, so anything
+        # but a fragment differing from what was asked is not one, and is
+        # said to be an error.
+        if urllib.parse.urldefrag(page.url)[0] != urllib.parse.urldefrag(url)[0]:
+            raise RuntimeError(
+                f"the navigation to {url} did not complete: no HTTP response "
+                f"came back and the page is still at {page.url}. Nothing was "
+                f"loaded; navigate again, or read the page to see where it is")
         return f"navigated to {page.url} (no HTTP response: same-document navigation)"
     return f"navigated to {response.url} (HTTP {response.status})"
 
