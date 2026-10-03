@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "invisible-playwright-mcp"
-version = "0.70.8"
+version = "0.70.9"
 description = "Anti detect browser and web browsing agent: undetected, no captchas, no blocks"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -73,7 +73,7 @@ dependencies = [
     # timed out asking the hidden input for a box to point at, after the
     # chooser had already opened. That is the commonest upload widget, and
     # every upload here goes through a chooser.
-    "invisible-playwright>=0.25.8",
+    "invisible-playwright>=0.25.9",
     # HTML parsing for browser_read_html. Chosen over lxml by measurement: on
     # six real pages both found byte-identical sets of interactive elements,
     # so correctness did not separate them, and selectolax then parsed 3-5x
