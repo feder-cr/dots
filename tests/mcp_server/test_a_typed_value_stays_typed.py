@@ -183,12 +183,12 @@ def url():
 def _seed_whose_first_pause(longer_than=None, shorter_than=None):
     """A seed whose first pause is known, so the store tests assert the
     mechanism instead of depending on a draw. The engine draws it: the first
-    field typed into on a page is its act "field", nonce 1, which its public
-    `hesitation` documents."""
-    from invisible_playwright import hesitation
+    field typed into on a page is its act "field", nonce 1; read from the
+    wrapper's internals here only to know what to expect."""
+    from invisible_playwright._behaviour import TypingPersona, plan_hesitation
 
     for seed in range(1, 5000):
-        p = hesitation(seed, "field", nonce=1)
+        p = plan_hesitation(TypingPersona.from_seed(seed), "field", 1) / 1000.0
         if (longer_than is None or p > longer_than) and (shorter_than is None or p < shorter_than):
             return seed, p
     raise AssertionError("no seed found")

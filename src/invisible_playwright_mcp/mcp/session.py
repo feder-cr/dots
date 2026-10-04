@@ -41,9 +41,6 @@ class StealthSession:
         # The clock a frame's age is read from. An attribute so a test can move
         # time instead of sleeping through STALE_AFTER.
         self._clock = time.monotonic
-        # How many hesitations this browser has drawn, so two acts in one
-        # session do not get the same one.
-        self._pause_nonce = 0
         # Directories this browser was given files from (upload snapshots),
         # removed when it closes: Firefox reads a picked file when the page
         # sends it, so they must last exactly as long as the browser does.
@@ -54,10 +51,6 @@ class StealthSession:
         """The seed this browser was launched with: the identity, and the hand
         its typing rhythm is drawn from. None when it was launched without one."""
         return self._kwargs.get("seed")
-
-    def next_pause_nonce(self) -> int:
-        self._pause_nonce += 1
-        return self._pause_nonce
 
     def keep_until_closed(self, path: str) -> None:
         self._kept.append(path)

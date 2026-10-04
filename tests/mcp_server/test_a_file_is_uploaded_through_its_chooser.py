@@ -233,14 +233,9 @@ class _Session:
     def __init__(self, page):
         self._page = page
         self.kept = []
-        self.nonces = 0
 
     def page(self):
         return self._page
-
-    def next_pause_nonce(self):
-        self.nonces += 1
-        return self.nonces
 
     def keep_until_closed(self, path):
         self.kept.append(path)
@@ -296,31 +291,20 @@ def test_a_hidden_input_with_no_label_is_refused_and_nothing_is_copied(env, tmp_
     assert os.listdir(tmp_path / "snapshots") == []
 
 
-def test_the_chooser_is_answered_after_a_persons_pause(env, monkeypatch):
-    """Measured on the first version: 60-80 ms between the chooser opening and
-    the change, which no person picks a file in. Known-bad: drop the pause."""
-    page = _Page({"file": True, "multiple": False, "shown": True})
-
-    def pause(seed, act, *, nonce=0, times=1):
-        page.calls.append(("pause", act, nonce, times))
-        return 0.0
-
-    monkeypatch.setattr(actions, "hesitation", pause)
-    _upload(page, [str(env / "a.pdf")])
-    assert [c[0] for c in page.calls] == ["click", "pause", "chooser"]
-    assert page.calls[1] == ("pause", "mcp:file-chooser", 1, 2)
-
-
-def test_the_chooser_pause_is_the_wrappers_public_one():
-    """The hesitation is drawn by the wrapper's public function, not rebuilt
-    here from its private names. Known-bad: `invisible_playwright._behaviour`
-    imported by this server, with the spread of a hesitation copied in."""
+def test_the_chooser_is_answered_through_the_standard_set_files(env):
+    """The pause before the files arrive is the wrapper's, inside the standard
+    `FileChooser.set_files`: the server draws none of its own, and reaches for
+    nothing outside Playwright's contract (decision D82: the wrapper adds no
+    helper for it). Known-bad: a pause or a helper import back in the server."""
     import inspect
 
-    import invisible_playwright
-
-    assert actions.hesitation is invisible_playwright.hesitation
-    assert "_behaviour" not in inspect.getsource(actions)
+    page = _Page({"file": True, "multiple": False, "shown": True})
+    _upload(page, [str(env / "a.pdf")])
+    assert [c[0] for c in page.calls] == ["click", "chooser"]
+    source = inspect.getsource(actions)
+    assert not hasattr(actions, "hesitation")
+    assert "hesitation(" not in source
+    assert "_behaviour" not in source
 
 
 def test_the_copies_belong_to_the_browser_and_go_when_it_closes(env, tmp_path):
@@ -464,8 +448,11 @@ def test_a_hidden_input_is_opened_by_its_label_after_a_persons_pause(url, env):
     assert clicks and clicks[0][1] == "pick" and clicks[0][2], order
     assert change[1] == "behind" and change[2], order
 
-    # The first act of this session that draws a pause, so its nonce is 1.
-    pause = actions.hesitation(seed, "mcp:file-chooser", nonce=1, times=2)
+    # The wrapper's own pause before the files: two hesitations of the
+    # session's hand, the first upload of the first page (nonce 1). Read from
+    # the wrapper's internals here only to know what to expect.
+    from invisible_playwright._behaviour import TypingPersona, plan_hesitation
+    pause = plan_hesitation(TypingPersona.from_seed(seed), "file", 1, times=2) / 1000.0
     assert (change[3] - clicks[0][3]) / 1000 >= pause * 0.9, (
         "the change came %.0f ms after the click, before this session's pause "
         "of %.0f ms" % (change[3] - clicks[0][3], pause * 1000))
