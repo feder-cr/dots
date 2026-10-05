@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "invisible-playwright-mcp"
-version = "0.70.10"
+version = "0.70.11"
 description = "Anti detect browser and web browsing agent: undetected, no captchas, no blocks"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -78,7 +78,13 @@ dependencies = [
     # person takes to pick a file, and the wrapper stopped exporting the
     # `hesitation` helper this server used to draw that pause with: nothing is
     # added to Playwright's own API.
-    "invisible-playwright>=0.25.12",
+    #
+    # And to 0.26.0, the firefox-36 engine through invisible-core 36.32.0:
+    # go_back over a page a script left, a routed POST's body, Accept-Language
+    # as retail Firefox sends it, ignore_https_errors per context, and the
+    # session language decided once by the core (an Australian egress reports
+    # en-US everywhere instead of en-AU in some values).
+    "invisible-playwright>=0.26.0",
     # HTML parsing for browser_read_html. Chosen over lxml by measurement: on
     # six real pages both found byte-identical sets of interactive elements,
     # so correctness did not separate them, and selectolax then parsed 3-5x
