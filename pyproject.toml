@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "invisible-playwright-mcp"
-version = "0.70.11"
+version = "0.70.12"
 description = "Anti detect browser and web browsing agent: undetected, no captchas, no blocks"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -84,7 +84,12 @@ dependencies = [
     # as retail Firefox sends it, ignore_https_errors per context, and the
     # session language decided once by the core (an Australian egress reports
     # en-US everywhere instead of en-AU in some values).
-    "invisible-playwright>=0.26.0",
+    #
+    # And to 0.27.0, through invisible-core 36.33.0: locale="auto" declares
+    # the real Firefox of the egress country, one of the builds people there
+    # run in their measured share, picked by the egress IP; an explicit locale
+    # is navigator.language ("en-AU" reports en-AU, en-US, en).
+    "invisible-playwright>=0.27.0",
     # HTML parsing for browser_read_html. Chosen over lxml by measurement: on
     # six real pages both found byte-identical sets of interactive elements,
     # so correctness did not separate them, and selectolax then parsed 3-5x
