@@ -16,3 +16,4 @@ produced the numbers are in the repository, under `tests/bench/` and
 - [Token counts are not portable between models](token-counts-across-models.md)
 - [Compacting a thread at the model's own window](compacting-at-the-models-window.md)
 - [Benchmarking an agent on real VMs](benchmarking-agents-on-real-vms.md)
+- [Browser calls that lead nowhere](browser-calls-that-lead-nowhere.md)

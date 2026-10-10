@@ -31,3 +31,6 @@ is how it is built.
   summarized.
 - [Benchmarking an agent on real VMs](benchmarking-agents-on-real-vms.md):
   Harbor tasks, two-to-three-hour builds, and eight Dots on one host.
+- [Browser calls that lead nowhere](browser-calls-that-lead-nowhere.md):
+  45 tasks call by call: addresses from memory, timeouts, and three tools that
+  never worked.
