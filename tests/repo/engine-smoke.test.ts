@@ -145,7 +145,7 @@ describe("the engine smoke", () => {
   it("pins the offered tools of a Dot granted everything to the permission table, tool for tool", () => {
     const table = read(join(repo, "invisible_engine_dots/nanobot/dots/permissions.py"));
     const tools = [...table.matchAll(/^ {8}"(\w+)": ToolEntry\(/gm)].map((m) => m[1]!).sort();
-    expect(tools.length).toBeGreaterThanOrEqual(30);
+    expect(tools.length).toBeGreaterThanOrEqual(27);
     const checks = read(join(smoke, "smoke.sh"));
     const first = /check_offered 1 [^\n]*\\\n[^\n]*\\\n\s+'(\[[^\n]*\])'/.exec(checks);
     expect(first, "check_offered 1").not.toBeNull();

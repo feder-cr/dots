@@ -106,10 +106,6 @@ def _taken(*names: str) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
     return lambda params: {name: params[name] for name in names if params.get(name) is not None}
 
 
-def _key(key: str) -> Callable[[Mapping[str, Any]], dict[str, Any]]:
-    return lambda params: {"key": key}
-
-
 def _scroll(params: Mapping[str, Any]) -> dict[str, Any]:
     return {"key": "PageUp" if params.get("direction") == "up" else "PageDown"}
 
@@ -149,7 +145,13 @@ PAGE_TOOLS: Mapping[str, PageTool] = {
             "cut is marked: raise max_chars, or narrow the selector." + _OPEN_FIRST,
             "browser_read_text",
             {
-                "selector": {**_SELECTOR, "type": ["string", "null"], "description": "Read only this element; the whole page when left out."},
+                # The server reads with document.querySelector, so only CSS: a selector of browser_snapshot in
+                # Playwright's own syntax (:nth-match(...), text=...) fails there.
+                "selector": {
+                    **_SELECTOR,
+                    "type": ["string", "null"],
+                    "description": "A CSS selector: read only this element; the whole page when left out.",
+                },
                 "max_chars": {
                     "type": ["integer", "null"],
                     "minimum": 1,
@@ -233,33 +235,11 @@ PAGE_TOOLS: Mapping[str, PageTool] = {
             _scroll,
             confirmation=lambda params: f"scrolled {params['direction']}",
         ),
-        PageTool(
-            "browser_back",
-            "Go back one page in the history of an identity (Alt+Left)." + _OPEN_FIRST,
-            "browser_press_key",
-            {},
-            (),
-            _key("Alt+Left"),
-            confirmation=lambda params: "went back",
-        ),
-        PageTool(
-            "browser_forward",
-            "Go forward one page in the history of an identity (Alt+Right)." + _OPEN_FIRST,
-            "browser_press_key",
-            {},
-            (),
-            _key("Alt+Right"),
-            confirmation=lambda params: "went forward",
-        ),
-        PageTool(
-            "browser_reload",
-            "Reload the page of an identity (F5)." + _OPEN_FIRST,
-            "browser_press_key",
-            {},
-            (),
-            _key("F5"),
-            confirmation=lambda params: "reloaded the page",
-        ),
+        # No back, forward or reload: they were Alt+Left, Alt+Right and F5 through browser_press_key, and a key the
+        # server presses reaches the page, never the browser's own shortcuts. Alt+Left is not even a key name of the
+        # library ("unknown key: 'Left'": three calls of three failed), and F5 answered that it reloaded a page it
+        # did not reload (measured on the library: the page's state survived it). browser_navigate does both: to
+        # the address a page came from, and to its own address, which loads it again.
     )
 }
 

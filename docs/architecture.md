@@ -1230,9 +1230,6 @@ does not know.
 | `browser_press_key` | `browser.act` | presses a key or a shortcut: `identity_id, key` |
 | `browser_select_option` | `browser.act` | chooses an option of a select element by its visible label or its value, as the server does: `identity_id, selector, value` |
 | `browser_scroll` | `browser.act` | scrolls one screen: `identity_id, direction` (`up` is PageUp, `down` is PageDown) |
-| `browser_back` | `browser.act` | goes back in the history (Alt+Left): `identity_id` |
-| `browser_forward` | `browser.act` | goes forward in the history (Alt+Right): `identity_id` |
-| `browser_reload` | `browser.act` | reloads the page (F5): `identity_id` |
 
 The browser tools are served by the `BrowserManager` and so by
 `invisible-playwright-mcp`, the only browser of a Dot; each takes an

@@ -44,9 +44,6 @@ def test_every_tool_maps_to_the_permission_of_the_design() -> None:
         "browser_press_key": "browser.act",
         "browser_select_option": "browser.act",
         "browser_scroll": "browser.act",
-        "browser_back": "browser.act",
-        "browser_forward": "browser.act",
-        "browser_reload": "browser.act",
     }
 
 
@@ -337,12 +334,9 @@ def test_each_browser_permission_offers_its_own_tools_only() -> None:
     assert offered_tools({"computer.screenshot": "allow"}) == ["computer_screenshot"]
     assert offered_tools({"browser.act": "deny", "browser.read": "deny"}) == []
     assert offered_tools({"browser.act": "allow"}) == [
-        "browser_back",
         "browser_click",
         "browser_click_at",
-        "browser_forward",
         "browser_press_key",
-        "browser_reload",
         "browser_scroll",
         "browser_select_option",
         "browser_type",
@@ -362,7 +356,6 @@ def test_a_browser_call_names_its_identity_and_what_it_acted_on() -> None:
     assert tool_target("browser_click_at", {"identity_id": ident, "x": 10, "y": 20}) == f"{ident}: at 10,20"
     assert tool_target("browser_scroll", {"identity_id": ident, "direction": "down"}) == f"{ident}: down"
     assert tool_target("browser_screenshot", {"identity_id": ident}) == ident
-    assert tool_target("browser_back", {"identity_id": ident}) == ident
     assert tool_target("browser_identity_launch", {"identity_id": ident}) == ident
     assert tool_target("browser_identity_create", {"name": "Shopping", "proxy": "http://u:pw@h:1"}) == "Shopping"
     assert tool_target("browser_identity_list", {}) is None

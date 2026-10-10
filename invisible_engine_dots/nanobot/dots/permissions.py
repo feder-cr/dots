@@ -203,9 +203,6 @@ TOOL_PERMISSIONS: Mapping[str, ToolEntry] = MappingProxyType(
         "browser_press_key": ToolEntry("browser.act", _build_page_tool("browser_press_key"), targets.browser_press_key_target),
         "browser_select_option": ToolEntry("browser.act", _build_page_tool("browser_select_option"), targets.browser_selector_target),
         "browser_scroll": ToolEntry("browser.act", _build_page_tool("browser_scroll"), targets.browser_scroll_target),
-        "browser_back": ToolEntry("browser.act", _build_page_tool("browser_back"), targets.browser_identity_only_target),
-        "browser_forward": ToolEntry("browser.act", _build_page_tool("browser_forward"), targets.browser_identity_only_target),
-        "browser_reload": ToolEntry("browser.act", _build_page_tool("browser_reload"), targets.browser_identity_only_target),
     }
 )
 

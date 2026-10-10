@@ -55,9 +55,13 @@ The order matters, because a page can tell the difference.
 3. Your eyes. `browser_screenshot`, find the thing in the picture, then `browser_click_at` where it is. For what the
    snapshot does not list at all. `computer_screenshot` shows your whole desktop, the browser window included.
 
+A cookie or consent dialog covers the page until it is answered: a click on anything under it waits 15 seconds and
+fails. When `browser_snapshot` shows one, click one of its buttons first.
+
 Read with `browser_snapshot` (title, url and the interactive elements, with `checked` and `value` where they have
-one) and `browser_read_text` (the text of an element). `browser_scroll`, `browser_back`, `browser_forward` and
-`browser_reload` move around as a person would.
+one) and `browser_read_text` (the text of the page, or of the element a CSS selector names: a snapshot selector
+such as `:nth-match(...)` is for clicking, not for reading). `browser_scroll` moves one screen. To go back, navigate
+to the address you came from; to load a page again, navigate to its own address.
 
 Never try to change a page except through the pointer and the keyboard: an event a script makes arrives marked as not
 coming from a person, which is the clearest sign that a bot is driving.

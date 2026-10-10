@@ -138,9 +138,6 @@ PAGE_CALLS: list[tuple[str, dict[str, Any], str, dict[str, Any]]] = [
     ("browser_select_option", {"selector": "#c", "value": "it"}, "browser_select_option", {"selector": "#c", "value": "it"}),
     ("browser_scroll", {"direction": "down"}, "browser_press_key", {"key": "PageDown"}),
     ("browser_scroll", {"direction": "up"}, "browser_press_key", {"key": "PageUp"}),
-    ("browser_back", {}, "browser_press_key", {"key": "Alt+Left"}),
-    ("browser_forward", {}, "browser_press_key", {"key": "Alt+Right"}),
-    ("browser_reload", {}, "browser_press_key", {"key": "F5"}),
 ]
 
 

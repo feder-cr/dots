@@ -43,9 +43,6 @@ export const TOOL_LABELS: Readonly<Record<string, ToolLabel>> = {
   browser_press_key: { label: "Pressed a key", ask: "press a key", family: "browser" },
   browser_select_option: { label: "Chose an option", ask: "choose an option", family: "browser" },
   browser_scroll: { label: "Scrolled the page", ask: "scroll the page", family: "browser" },
-  browser_back: { label: "Went back", ask: "go back", family: "browser" },
-  browser_forward: { label: "Went forward", ask: "go forward", family: "browser" },
-  browser_reload: { label: "Reloaded the page", ask: "reload the page", family: "browser" },
 };
 
 /** What a command that was started in a terminal (`exec` with `tty`, which the engine reports on `tool.called`) did: it did not just run. */
