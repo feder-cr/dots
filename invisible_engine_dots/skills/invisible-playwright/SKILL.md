@@ -1,6 +1,6 @@
 ---
 name: invisible-playwright
-description: Use the Dot's browser (invisible_playwright) for any task on a website: logging in, reading pages, filling forms, clicking through a site as a person would.
+description: Use the Dot's browser (invisible_playwright) for any task on a website or search on the web: finding a page, logging in, reading pages, filling forms, clicking through a site as a person would.
 ---
 
 # The browser
@@ -27,6 +27,21 @@ uses.
 
 Each open identity drives one page. `browser_navigate` opens a url in it, and every other tool acts on that page.
 Going somewhere else and coming back is a navigation, not a second window.
+
+## Finding a page
+
+A page is reached through a link you have seen or an address the person gave you, not one you remember. Sites move
+their pages: an address recalled from memory often answers 404 today, and every try costs one of the task's steps.
+
+- From a page you have: `browser_snapshot` lists its links with their selectors and URLs. Click the one that says where
+  you want to go, or navigate to its URL. A site's own menu and its own search box reach what you cannot guess.
+- From nothing: search. Navigate to `https://search.brave.com/search?q=<your words>` and read the results with
+  `browser_snapshot`: each result's URL is real, open the one that fits. An answer panel at the top or a notice at the
+  bottom is not a result. If Brave does not answer, `https://duckduckgo.com/html/?q=<your words>` gives the same.
+- Read the status `browser_navigate` answers before trusting the page: a 404 or a 403 still has a document, and reading
+  it as content is a mistake. After a 404, do not try another address from memory: go back to a page that loaded and
+  take a link from it, or search.
+- An address from memory is for a site's home page at most, once. Everything under it comes from the site's own links.
 
 ## Acting on a page: try things in this order
 

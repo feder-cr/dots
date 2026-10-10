@@ -1390,9 +1390,10 @@ are cut with a marker.
   then the steps). Built-in ones ship with the engine, beside its package
   (`invisible_engine_dots/skills/`, on the runtime disk at
   `/opt/invisible-dots/engine/skills/`); the first, `invisible-playwright`, says how
-  to use the browser: identities, the order a page cannot tell from a person
-  (a selector, then coordinates, then a screenshot), and when to say a task is
-  impossible. The Dot writes its own under `/home/dot/skills/<name>/SKILL.md` with
+  to use the browser: identities, how a page is found (a link seen in a
+  snapshot or a search on Brave, never an address from memory), the order a
+  page cannot tell from a person (a selector, then coordinates, then a
+  screenshot), and when to say a task is impossible. The Dot writes its own under `/home/dot/skills/<name>/SKILL.md` with
   the file tools as it learns, and one of its own replaces a built-in one of the
   same name. The system prompt names every skill with its description and the path
   of its file, read again each turn (`nanobot/dots/skills.py`), and says to read the
